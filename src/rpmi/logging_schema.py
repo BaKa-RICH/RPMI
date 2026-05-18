@@ -30,17 +30,22 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
     "vehicles_step.csv": SHARED_COLUMNS
     + [
         "vehicle_id",
+        "role",
+        "veh_type",
         "lane",
         "x",
         "v",
+        "a",
         "length",
-        "veh_type",
         "a_nominal",
         "a_action",
         "a_eff",
         "speed_floor_clip",
+        "leader_id",
+        "gap_to_leader",
         "controlled_by_action_id",
         "reservation_id",
+        "invalid_overlap_flag",
     ],
     "slots.csv": SHARED_COLUMNS
     + [
@@ -126,11 +131,14 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
     + [
         "event_id",
         "event_type",
+        "vehicle_ids",
+        "min_gap",
+        "min_margin",
+        "severity",
         "linked_reservation_id",
         "linked_action_id",
         "linked_edge_id",
-        "severity",
-        "details",
+        "note",
     ],
     "metrics_step.csv": SHARED_COLUMNS
     + [
@@ -149,6 +157,47 @@ def write_empty_csv(path: str | Path, columns: list[str]) -> None:
         writer.writerow(columns)
 
 
+def append_csv_rows(
+    path: str | Path,
+    columns: list[str],
+    rows: list[dict[str, object]],
+) -> None:
+    """Append dictionaries to a CSV file using the declared schema order."""
+
+    if not rows:
+        return
+    with Path(path).open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=columns, extrasaction="ignore")
+        for row in rows:
+            writer.writerow({column: _csv_value(row.get(column)) for column in columns})
+
+
+def append_vehicle_step_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append realized vehicle-step rows to ``vehicles_step.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["vehicles_step.csv"], rows)
+
+
+def append_realized_event_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append no-fallback event rows to ``realized_events.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["realized_events.csv"], rows)
+
+
+def _csv_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return value
+
+
 def init_empty_logs(run_dir: str | Path) -> None:
     """Create all Phase 0 log files with headers and empty JSON placeholders."""
 
@@ -163,4 +212,3 @@ def init_empty_logs(run_dir: str | Path) -> None:
         json.dumps({"schema_version": "phase0_v1", "metrics": {}}, indent=2) + "\n",
         encoding="utf-8",
     )
-
