@@ -53,9 +53,12 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "front_id",
         "rear_id",
         "k",
-        "action_context",
         "tau",
         "physical_gap_id",
+        "eval_context",
+        "action_id",
+        "gap_at_tau",
+        "boundary_type",
     ],
     "edges.csv": SHARED_COLUMNS
     + [
@@ -65,14 +68,26 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "front_id",
         "rear_id",
         "k",
-        "action_context",
+        "tau",
+        "eval_context",
+        "action_id",
+        "physical_gap_id",
+        "I_reach",
+        "I_surv",
+        "I_safe",
+        "I_rec",
         "P_R",
-        "RD",
         "V_phys_theory",
         "V_phys_buffer",
+        "W",
+        "delta_W_req",
+        "RD",
+        "rd_components_json",
+        "is_reservable",
+        "reason_not_reservable",
+        "fail_reason_priority",
         "surv_mode",
         "validity_mode",
-        "fail_reason_priority",
     ],
     "near_miss_edges.csv": SHARED_COLUMNS
     + [
@@ -188,6 +203,24 @@ def append_realized_event_rows(
     """Append no-fallback event rows to ``realized_events.csv``."""
 
     append_csv_rows(path, CSV_LOG_SCHEMAS["realized_events.csv"], rows)
+
+
+def append_slot_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append time-expanded slot rows to ``slots.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["slots.csv"], rows)
+
+
+def append_edge_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append edge validity rows to ``edges.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["edges.csv"], rows)
 
 
 def _csv_value(value: object) -> object:
