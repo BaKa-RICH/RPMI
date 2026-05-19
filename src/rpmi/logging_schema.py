@@ -124,6 +124,11 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "matched",
         "conflict_mode",
         "match_reason",
+        "tau",
+        "physical_gap_id",
+        "P_R",
+        "RD",
+        "weight",
     ],
     "reservations.csv": SHARED_COLUMNS
     + [
@@ -221,6 +226,15 @@ def append_edge_rows(
     """Append edge validity rows to ``edges.csv``."""
 
     append_csv_rows(path, CSV_LOG_SCHEMAS["edges.csv"], rows)
+
+
+def append_matching_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append diagnostic matching rows to ``matching.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["matching.csv"], rows)
 
 
 def _csv_value(value: object) -> object:
