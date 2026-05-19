@@ -108,21 +108,42 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
     + [
         "action_id",
         "action_type",
-        "action_index",
-        "controlled_cav_ids",
+        "nominal_edge_id",
+        "controlled_cavs",
+        "target_gap_id",
+        "boundary_type",
+        "control_start",
+        "control_end",
         "requested_delta_W",
+        "delta_W_target",
+        "T_prod",
+        "u_front",
+        "u_rear",
+        "profile_clip_flag",
         "estimated_delta_W_after_clip",
         "action_profile_feasible",
-        "profile_clip_flag",
+        "estimated_cost",
+        "rejected_before_rollout",
+        "reject_reason",
     ],
     "action_evaluations.csv": SHARED_COLUMNS
     + [
         "action_id",
-        "candidate_rank",
-        "score",
+        "J",
+        "Z_bar",
         "D_bar",
         "C_bar",
+        "RCMV",
+        "S_R",
+        "Z_R",
+        "matched_count",
+        "matched_edge_ids",
+        "invalid_count",
         "selected",
+        "rank",
+        "rejected_by_theta",
+        "cost_components_json",
+        "matched_rd_sum",
     ],
     "matching.csv": SHARED_COLUMNS
     + [
@@ -155,6 +176,7 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "actual_margin_rear",
         "status",
         "failure_reason",
+        "stale_flag",
     ],
     "realized_events.csv": SHARED_COLUMNS
     + [
@@ -253,6 +275,33 @@ def append_readiness_summary_rows(
     """Append Wave 4 readiness rows to ``readiness_summary.csv``."""
 
     append_csv_rows(path, CSV_LOG_SCHEMAS["readiness_summary.csv"], rows)
+
+
+def append_action_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append Phase 5 action rows to ``actions.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["actions.csv"], rows)
+
+
+def append_action_evaluation_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append Phase 5 action-evaluation rows to ``action_evaluations.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["action_evaluations.csv"], rows)
+
+
+def append_reservation_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append Phase 5 reservation rows to ``reservations.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["reservations.csv"], rows)
 
 
 def _csv_value(value: object) -> object:
