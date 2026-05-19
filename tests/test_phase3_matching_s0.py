@@ -223,8 +223,14 @@ def test_formal_s0_batch_rerun_exports_joined_table(tmp_path):
     assert result.outcome_path.exists()
     assert result.summary_path.exists()
     assert result.raw_gap_illusion_subset_path.exists()
+    assert result.target_summary_path.exists()
+    assert result.target_variance_path.exists()
+    assert result.multivariable_summary_path.exists()
+    assert result.raw_gap_illusion_audit_path.exists()
+    assert result.gate_report_path.exists()
     assert len(result.joined_rows) == 16
     assert {row["label_policy"] for row in result.joined_rows} == {"FIFO_no_production"}
+    assert {row["label_semantics"] for row in result.joined_rows} == {"diagnostic_proxy"}
     assert any(row["s0_stratum"] == "raw-high/Z-high" for row in result.joined_rows)
     assert any(row["s0_stratum"] == "raw-high/Z-low" for row in result.joined_rows)
 
@@ -233,6 +239,7 @@ def test_formal_s0_batch_rerun_exports_joined_table(tmp_path):
 
     assert len(rows) == 16
     assert {row["label_policy"] for row in rows} == {"FIFO_no_production"}
+    assert {row["label_semantics"] for row in rows} == {"diagnostic_proxy"}
     assert "raw-high/Z-high" in {row["s0_stratum"] for row in rows}
     assert "raw-high/Z-low" in {row["s0_stratum"] for row in rows}
 
@@ -246,10 +253,61 @@ def test_formal_s0_batch_summary_and_illusion_subset(tmp_path):
 
     assert summary["row_count"] == 16
     assert summary["label_policy"] == "FIFO_no_production"
+    assert summary["label_semantics_counts"] == {"diagnostic_proxy": 16}
+    assert summary["unique_state_hash_count"] == 4
+    assert summary["repeated_state_hash_count"] == 12
     assert summary["raw_high_z_high_count"] > 0
     assert summary["raw_high_z_low_count"] > 0
     assert "Z_H_R" in summary["pearson_correlation"]
     assert "Z_H_R" in summary["rank_correlation"]
     assert "Z_H_R" in summary["simple_regression"]
+    assert summary["target_variance"]["hard_brake_count"]["status"] == "no_evidence_constant_target"
+    assert summary["target_variance"]["speed_wave_amplitude"]["status"] == "no_evidence_constant_target"
+    assert summary["density_speed_collinearity"]["claim_guidance"] == (
+        "do_not_claim_Z_superior_to_density_speed_in_this_batch"
+    )
+    assert "predictor superiority on hard_brake_count" in summary["gate_report"]["blocked_claims"]
     assert illusion_rows
     assert all(row["raw_gap_stratum"] == "raw-high" for row in illusion_rows)
+
+
+def test_wave3b_plus_deconfounded_batch_reports_evidence_quality(tmp_path):
+    result = run_formal_s0_batch_rerun(
+        make_scenario_config("S0", seed=50),
+        tmp_path,
+        N=32,
+        sample_mode="deconfounded",
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    gate = json.loads(result.gate_report_path.read_text(encoding="utf-8"))
+    audit = json.loads(result.raw_gap_illusion_audit_path.read_text(encoding="utf-8"))
+
+    assert len(result.joined_rows) == 32
+    assert summary["unique_state_hash_count"] == 32
+    assert summary["repeated_state_hash_count"] == 0
+    assert summary["label_policy_counts"] == {"FIFO_no_production": 32}
+    assert summary["label_semantics_counts"] == {"diagnostic_proxy": 32}
+    assert summary["target_variance"]["future_ramp_waiting"]["status"] == "supported_nonconstant_target"
+    assert summary["target_variance"]["hard_brake_count"]["status"] == "no_evidence_constant_target"
+    assert summary["target_variance"]["speed_wave_amplitude"]["status"] == "no_evidence_constant_target"
+    assert summary["multivariable_regression"]["future_ramp_waiting"]["status"] in {
+        "ok",
+        "singular_controls",
+    }
+    assert audit["row_count"] == len(result.raw_gap_illusion_rows)
+    assert audit["unique_state_hash_count"] >= 2
+    assert audit["reason_code_distribution"]
+    assert gate["implementation_status"] == "implementation pass"
+    assert "independent future 30s rollout performance proof" in gate["blocked_claims"]
+
+    with result.target_summary_path.open(newline="", encoding="utf-8") as file:
+        target_rows = list(csv.DictReader(file))
+    with result.target_variance_path.open(newline="", encoding="utf-8") as file:
+        variance_rows = list(csv.DictReader(file))
+
+    assert any(row["target"] == "slot_expiration_count" for row in target_rows)
+    assert any(
+        row["target"] == "speed_wave_amplitude"
+        and row["status"] == "no_evidence_constant_target"
+        for row in variance_rows
+    )

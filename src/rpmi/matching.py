@@ -20,11 +20,43 @@ ConflictMode = Literal[
 
 
 S0_LABEL_POLICY = "FIFO_no_production"
+S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY = "diagnostic_proxy"
+S0_LABEL_SEMANTICS_INDEPENDENT_ROLLOUT = "independent_rollout"
+S0_OUTCOME_TARGET_COLUMNS = [
+    "future_ramp_waiting",
+    "failed_reservation_count",
+    "slot_expiration_count",
+    "hard_brake_count",
+    "recovery_time",
+    "speed_wave_amplitude",
+    "invalid_event_count",
+]
+S0_PROXY_TARGET_COLUMNS = [f"{column}_proxy" for column in S0_OUTCOME_TARGET_COLUMNS]
+S0_PREDICTOR_SUMMARY_COLUMNS = [
+    "G_H",
+    "Z_H_R",
+    "S_H_R",
+    "D_H",
+    "density_imbalance",
+    "speed_difference",
+    "reservable_edge_count",
+    "matched_edge_count",
+    "mean_RD_all_edges",
+    "mean_RD_matched",
+    "near_miss_count_baseline",
+    "raw_gap_illusion_count",
+]
 S0_PREDICTOR_COLUMNS = [
     "sample_id",
     "scenario_id",
     "seed",
     "sample_index",
+    "sample_mode",
+    "factor_raw_gap",
+    "factor_deficit",
+    "factor_density",
+    "factor_speed",
+    "factor_replicate",
     "G_H",
     "raw_time_expanded_slot_count",
     "density_imbalance",
@@ -41,19 +73,16 @@ S0_PREDICTOR_COLUMNS = [
     "raw_gap_illusion_count",
     "total_edge_count",
     "boundary_cav_available_count",
+    "dominant_invalid_reasons",
     "readiness_pass",
     "readiness_reason",
 ]
 S0_OUTCOME_COLUMNS = [
     "sample_id",
     "label_policy",
-    "future_ramp_waiting",
-    "failed_reservation_count",
-    "slot_expiration_count",
-    "hard_brake_count",
-    "recovery_time",
-    "speed_wave_amplitude",
-    "invalid_event_count",
+    "label_semantics",
+    *S0_OUTCOME_TARGET_COLUMNS,
+    *S0_PROXY_TARGET_COLUMNS,
 ]
 S0_JOINED_COLUMNS = [
     *S0_PREDICTOR_COLUMNS,
@@ -139,6 +168,11 @@ class FormalS0BatchResult:
     joined_path: Path
     summary_path: Path
     raw_gap_illusion_subset_path: Path
+    target_summary_path: Path
+    target_variance_path: Path
+    multivariable_summary_path: Path
+    raw_gap_illusion_audit_path: Path
+    gate_report_path: Path
     predictor_rows: list[dict[str, Any]]
     outcome_rows: list[dict[str, Any]]
     joined_rows: list[dict[str, Any]]
@@ -372,6 +406,7 @@ def compute_future_outcome_row(sample: ToyS0Sample) -> dict[str, Any]:
     return {
         "sample_id": sample.sample_id,
         "label_policy": S0_LABEL_POLICY,
+        "label_semantics": S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY,
         "future_ramp_waiting": sample.future_ramp_waiting,
         "failed_reservation_count": sample.failed_reservation_count,
         "slot_expiration_count": sample.slot_expiration_count,
@@ -379,6 +414,13 @@ def compute_future_outcome_row(sample: ToyS0Sample) -> dict[str, Any]:
         "recovery_time": sample.recovery_time,
         "speed_wave_amplitude": sample.speed_wave_amplitude,
         "invalid_event_count": sample.invalid_event_count,
+        "future_ramp_waiting_proxy": sample.future_ramp_waiting,
+        "failed_reservation_count_proxy": sample.failed_reservation_count,
+        "slot_expiration_count_proxy": sample.slot_expiration_count,
+        "hard_brake_count_proxy": sample.hard_brake_count,
+        "recovery_time_proxy": sample.recovery_time,
+        "speed_wave_amplitude_proxy": sample.speed_wave_amplitude,
+        "invalid_event_count_proxy": sample.invalid_event_count,
     }
 
 
@@ -396,6 +438,7 @@ def join_predictor_outcome_rows(
             continue
         row = {**dict(predictor), **dict(outcome_by_id[sample_id])}
         row["label_policy"] = S0_LABEL_POLICY
+        row.setdefault("label_semantics", S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY)
         joined.append(row)
     return joined
 
@@ -424,20 +467,7 @@ def analyze_predictor_outcome(
             "rank_correlation": {},
             "simple_regression": {},
         }
-    predictor_columns = [
-        "G_H",
-        "Z_H_R",
-        "S_H_R",
-        "D_H",
-        "density_imbalance",
-        "speed_difference",
-        "reservable_edge_count",
-        "matched_edge_count",
-        "mean_RD_all_edges",
-        "mean_RD_matched",
-        "near_miss_count_baseline",
-        "raw_gap_illusion_count",
-    ]
+    predictor_columns = list(S0_PREDICTOR_SUMMARY_COLUMNS)
     target = _numeric_column(rows, target_column)
     return {
         "row_count": len(rows),
@@ -489,6 +519,59 @@ def analyze_predictor_outcome(
     }
 
 
+def analyze_s0_targets(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    target_columns: Sequence[str] = S0_OUTCOME_TARGET_COLUMNS,
+    predictor_columns: Sequence[str] = S0_PREDICTOR_SUMMARY_COLUMNS,
+) -> dict[str, Any]:
+    """Analyze every S0 target and mark constant targets as unsupported."""
+
+    summaries: dict[str, Any] = {}
+    for target_column in target_columns:
+        target = _numeric_column(rows, target_column)
+        variance = _variance(target)
+        unique_values = sorted(set(target))
+        status = "supported_nonconstant_target" if variance > 0.0 else "no_evidence_constant_target"
+        if status == "no_evidence_constant_target":
+            summaries[target_column] = {
+                "target_column": target_column,
+                "status": status,
+                "row_count": len(rows),
+                "variance": variance,
+                "unique_value_count": len(unique_values),
+                "unique_values": unique_values,
+                "pearson_correlation": {},
+                "rank_correlation": {},
+                "simple_regression": {},
+            }
+            continue
+        summaries[target_column] = {
+            "target_column": target_column,
+            "status": status,
+            "row_count": len(rows),
+            "variance": variance,
+            "unique_value_count": len(unique_values),
+            "unique_values": unique_values,
+            "pearson_correlation": {
+                column: _pearson(_numeric_column(rows, column), target)
+                for column in predictor_columns
+                if rows and column in rows[0]
+            },
+            "rank_correlation": {
+                column: _pearson(_ranks(_numeric_column(rows, column)), _ranks(target))
+                for column in predictor_columns
+                if rows and column in rows[0]
+            },
+            "simple_regression": {
+                column: _simple_regression(_numeric_column(rows, column), target)
+                for column in predictor_columns
+                if rows and column in rows[0]
+            },
+        }
+    return summaries
+
+
 def compute_formal_s0_predictor_row(
     sample_id: str,
     state: Any,
@@ -497,6 +580,7 @@ def compute_formal_s0_predictor_row(
     sample_index: int | None = None,
     seed: int | None = None,
     target_lane: int = 0,
+    sample_config: Any | None = None,
 ) -> dict[str, Any]:
     """Build one S0 predictor row from Phase 4 readiness diagnostics."""
 
@@ -510,10 +594,18 @@ def compute_formal_s0_predictor_row(
         if quality.edge_id in selected_ids
     ]
     lane_features = _lane_feature_row(state, target_lane)
+    mechanism_targets = dict(_config_value(sample_config, "mechanism_targets", {}) or {})
+    controls = dict(mechanism_targets.get("s0_factor_controls", {}) or {})
     row: dict[str, Any] = {
         "sample_id": sample_id,
         "scenario_id": readiness_metrics.get("scenario_id", "S0"),
         "seed": readiness_metrics.get("seed", 0) if seed is None else seed,
+        "sample_mode": mechanism_targets.get("s0_sample_mode", "formal_stratified"),
+        "factor_raw_gap": controls.get("raw_gap", ""),
+        "factor_deficit": controls.get("deficit", ""),
+        "factor_density": controls.get("density", ""),
+        "factor_speed": controls.get("speed", ""),
+        "factor_replicate": controls.get("replicate", ""),
         "G_H": readiness_metrics.get("G_H", 0),
         "raw_time_expanded_slot_count": readiness_metrics.get("raw_time_expanded_slot_count", 0),
         "density_imbalance": lane_features["density_imbalance"],
@@ -533,6 +625,7 @@ def compute_formal_s0_predictor_row(
         "raw_gap_illusion_count": readiness_metrics.get("raw_gap_illusion_count", 0),
         "total_edge_count": readiness_metrics.get("total_edge_count", len(qualities)),
         "boundary_cav_available_count": readiness_metrics.get("boundary_cav_available_count", 0),
+        "dominant_invalid_reasons": readiness_metrics.get("dominant_invalid_reasons", {}),
     }
     if sample_index is not None:
         row["sample_index"] = sample_index
@@ -542,6 +635,8 @@ def compute_formal_s0_predictor_row(
 def compute_formal_s0_future_outcome_row(
     sample_id: str,
     readiness_metrics: Mapping[str, Any],
+    *,
+    label_semantics: str = S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY,
 ) -> dict[str, Any]:
     """Build one fixed-policy formal S0 outcome row from diagnostics."""
 
@@ -550,9 +645,7 @@ def compute_formal_s0_future_outcome_row(
     reservable = int(readiness_metrics.get("reservable_edge_count", 0))
     invalid_reasons = readiness_metrics.get("dominant_invalid_reasons", {})
     invalid_count = sum(int(value) for value in dict(invalid_reasons).values())
-    return {
-        "sample_id": sample_id,
-        "label_policy": S0_LABEL_POLICY,
+    values = {
         "future_ramp_waiting": z_h_r,
         "failed_reservation_count": int(round(z_h_r)),
         "slot_expiration_count": max(raw_slots - reservable, 0),
@@ -560,6 +653,13 @@ def compute_formal_s0_future_outcome_row(
         "recovery_time": z_h_r,
         "speed_wave_amplitude": 0.0,
         "invalid_event_count": invalid_count,
+    }
+    return {
+        "sample_id": sample_id,
+        "label_policy": S0_LABEL_POLICY,
+        "label_semantics": label_semantics,
+        **values,
+        **{f"{column}_proxy": value for column, value in values.items()},
     }
 
 
@@ -570,15 +670,24 @@ def run_formal_s0_batch_rerun(
     N: int = 16,
     raw_high_threshold: float | None = None,
     z_high_threshold: float = 0.0,
+    sample_mode: str = "formal_stratified",
+    label_semantics: str = S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY,
 ) -> FormalS0BatchResult:
     """Generate formal S0 predictor/outcome artifacts with fixed FIFO labels."""
 
     if N <= 0:
         raise ValueError("N must be positive")
+    if label_semantics not in {
+        S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY,
+        S0_LABEL_SEMANTICS_INDEPENDENT_ROLLOUT,
+    }:
+        raise ValueError(f"Unknown label semantics: {label_semantics!r}")
 
     from rpmi.scenarios import (  # Local import avoids a matching/scenarios import cycle.
         compute_readiness_metrics,
-        generate_s0_samples,
+        generate_s0_deconfounded_sample_configs,
+        generate_s0_sample_configs,
+        generate_state,
         make_scenario_config,
         readiness_check,
     )
@@ -587,15 +696,21 @@ def run_formal_s0_batch_rerun(
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
-    states = generate_s0_samples(scenario_config, N=N)
+    if sample_mode == "deconfounded":
+        sample_configs = generate_s0_deconfounded_sample_configs(scenario_config, N=N)
+    elif sample_mode == "formal_stratified":
+        sample_configs = generate_s0_sample_configs(scenario_config, N=N)
+    else:
+        raise ValueError(f"Unknown S0 sample mode: {sample_mode!r}")
+    states = [generate_state(sample_config) for sample_config in sample_configs]
     base_seed = int(_config_value(scenario_config, "seed", 0))
-    target_lane = int(_config_value(_config_value(scenario_config, "road", {}), "target_lane", 0))
     predictor_rows: list[dict[str, Any]] = []
     outcome_rows: list[dict[str, Any]] = []
-    for index, state in enumerate(states):
-        metrics = compute_readiness_metrics(state, scenario_config)
-        report = readiness_check(metrics, scenario_config)
+    for index, (state, sample_config) in enumerate(zip(states, sample_configs)):
+        metrics = compute_readiness_metrics(state, sample_config)
+        report = readiness_check(metrics, sample_config)
         sample_id = _formal_s0_sample_id(index, metrics)
+        target_lane = int(_config_value(_config_value(sample_config, "road", {}), "target_lane", 0))
         predictor = compute_formal_s0_predictor_row(
             sample_id,
             state,
@@ -603,11 +718,18 @@ def run_formal_s0_batch_rerun(
             sample_index=index,
             seed=base_seed + index,
             target_lane=target_lane,
+            sample_config=sample_config,
         )
         predictor["readiness_pass"] = report.readiness_pass
         predictor["readiness_reason"] = "PASS" if report.readiness_pass else report.fail_reason
         predictor_rows.append(predictor)
-        outcome_rows.append(compute_formal_s0_future_outcome_row(sample_id, metrics))
+        outcome_rows.append(
+            compute_formal_s0_future_outcome_row(
+                sample_id,
+                metrics,
+                label_semantics=label_semantics,
+            )
+        )
 
     threshold = _median([float(row["G_H"]) for row in predictor_rows])
     if raw_high_threshold is not None:
@@ -622,14 +744,25 @@ def run_formal_s0_batch_rerun(
         raw_high_threshold=threshold,
         z_high_threshold=z_high_threshold,
     )
+    target_summaries = analyze_s0_targets(joined_rows)
     summary["strata_counts"] = _strata_counts(joined_rows)
+    summary.update(_evidence_quality_summary(joined_rows))
     raw_gap_illusion_rows = _raw_gap_illusion_subset(joined_rows)
+    raw_gap_illusion_audit = _raw_gap_illusion_audit(raw_gap_illusion_rows)
+    summary["raw_gap_illusion_audit"] = raw_gap_illusion_audit
+    summary["density_speed_collinearity"] = _density_speed_collinearity(joined_rows)
+    summary["gate_report"] = _wave3b_gate_report(joined_rows, raw_gap_illusion_rows, summary)
 
     predictor_path = directory / "s0_predictor_table.csv"
     outcome_path = directory / "s0_future_outcome_table.csv"
     joined_path = directory / "s0_predictor_outcome_joined.csv"
     summary_path = directory / "s0_predictor_outcome_summary.json"
     raw_gap_illusion_subset_path = directory / "s0_raw_gap_illusion_subset.csv"
+    target_summary_path = directory / "s0_target_summary.csv"
+    target_variance_path = directory / "s0_target_variance_summary.csv"
+    multivariable_summary_path = directory / "s0_multivariable_summary.csv"
+    raw_gap_illusion_audit_path = directory / "s0_raw_gap_illusion_audit.json"
+    gate_report_path = directory / "wave3b_gate_report.json"
 
     _write_csv(predictor_path, predictor_rows, S0_PREDICTOR_COLUMNS)
     _write_csv(outcome_path, outcome_rows, S0_OUTCOME_COLUMNS)
@@ -639,6 +772,21 @@ def run_formal_s0_batch_rerun(
         encoding="utf-8",
     )
     _write_csv(raw_gap_illusion_subset_path, raw_gap_illusion_rows, S0_JOINED_COLUMNS)
+    _write_csv(target_summary_path, _target_summary_rows(target_summaries), _target_summary_columns())
+    _write_csv(target_variance_path, _target_variance_rows(summary["target_variance"]), _target_variance_columns())
+    _write_csv(
+        multivariable_summary_path,
+        _multivariable_summary_rows(summary["multivariable_regression"]),
+        _multivariable_summary_columns(),
+    )
+    raw_gap_illusion_audit_path.write_text(
+        json.dumps(raw_gap_illusion_audit, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    gate_report_path.write_text(
+        json.dumps(summary["gate_report"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     return FormalS0BatchResult(
         output_dir=directory,
@@ -647,6 +795,11 @@ def run_formal_s0_batch_rerun(
         joined_path=joined_path,
         summary_path=summary_path,
         raw_gap_illusion_subset_path=raw_gap_illusion_subset_path,
+        target_summary_path=target_summary_path,
+        target_variance_path=target_variance_path,
+        multivariable_summary_path=multivariable_summary_path,
+        raw_gap_illusion_audit_path=raw_gap_illusion_audit_path,
+        gate_report_path=gate_report_path,
         predictor_rows=predictor_rows,
         outcome_rows=outcome_rows,
         joined_rows=joined_rows,
@@ -901,6 +1054,13 @@ def _mean(values: Sequence[float]) -> float:
     return float(sum(values) / len(values))
 
 
+def _variance(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    mean_value = _mean(values)
+    return float(sum((value - mean_value) ** 2 for value in values) / len(values))
+
+
 def _median(values: Sequence[float]) -> float:
     if not values:
         return 0.0
@@ -964,6 +1124,80 @@ def _simple_regression(x_values: Sequence[float], y_values: Sequence[float]) -> 
     }
 
 
+def _linear_regression(
+    x_matrix: Sequence[Sequence[float]],
+    y_values: Sequence[float],
+) -> dict[str, Any]:
+    if not x_matrix or not y_values or len(x_matrix) != len(y_values):
+        return {"status": "insufficient_data", "coefficients": [], "r_squared": 0.0}
+    design = [[1.0, *[float(value) for value in row]] for row in x_matrix]
+    xtx = [
+        [sum(row[i] * row[j] for row in design) for j in range(len(design[0]))]
+        for i in range(len(design[0]))
+    ]
+    xty = [sum(row[i] * y for row, y in zip(design, y_values)) for i in range(len(design[0]))]
+    coefficients = _solve_linear_system(xtx, xty)
+    if coefficients is None:
+        return {"status": "singular_design", "coefficients": [], "r_squared": 0.0}
+    predictions = [
+        sum(coef * value for coef, value in zip(coefficients, row))
+        for row in design
+    ]
+    mean_y = _mean(y_values)
+    ss_total = sum((y - mean_y) ** 2 for y in y_values)
+    ss_residual = sum((y - y_hat) ** 2 for y, y_hat in zip(y_values, predictions))
+    r_squared = 0.0 if ss_total == 0.0 else max(0.0, 1.0 - ss_residual / ss_total)
+    return {
+        "status": "ok",
+        "coefficients": [float(value) for value in coefficients],
+        "r_squared": float(r_squared),
+    }
+
+
+def _solve_linear_system(
+    matrix: Sequence[Sequence[float]],
+    vector: Sequence[float],
+) -> list[float] | None:
+    n = len(vector)
+    if n == 0 or any(len(row) != n for row in matrix):
+        return None
+    augmented = [list(row) + [float(value)] for row, value in zip(matrix, vector)]
+    for pivot_index in range(n):
+        pivot_row = max(range(pivot_index, n), key=lambda row: abs(augmented[row][pivot_index]))
+        if abs(augmented[pivot_row][pivot_index]) < 1e-10:
+            return None
+        if pivot_row != pivot_index:
+            augmented[pivot_index], augmented[pivot_row] = augmented[pivot_row], augmented[pivot_index]
+        pivot = augmented[pivot_index][pivot_index]
+        augmented[pivot_index] = [value / pivot for value in augmented[pivot_index]]
+        for row_index in range(n):
+            if row_index == pivot_index:
+                continue
+            factor = augmented[row_index][pivot_index]
+            augmented[row_index] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(augmented[row_index], augmented[pivot_index])
+            ]
+    return [row[-1] for row in augmented]
+
+
+def _residuals_against_controls(
+    values: Sequence[float],
+    controls: Sequence[Sequence[float]],
+) -> list[float] | None:
+    if not values:
+        return []
+    model = _linear_regression(controls, values)
+    if model["status"] != "ok":
+        return None
+    coefficients = model["coefficients"]
+    predictions = [
+        sum(coef * value for coef, value in zip(coefficients, [1.0, *row]))
+        for row in controls
+    ]
+    return [value - prediction for value, prediction in zip(values, predictions)]
+
+
 def _lane_feature_row(state: Any, target_lane: int) -> dict[str, float]:
     vehicles = [
         vehicle
@@ -1024,6 +1258,299 @@ def _raw_gap_illusion_subset(rows: Sequence[Mapping[str, Any]]) -> list[dict[str
     ]
 
 
+def _evidence_quality_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    state_hashes = [str(row.get("state_hash", "")) for row in rows]
+    unique_hashes = sorted(set(state_hashes))
+    target_summaries = analyze_s0_targets(rows)
+    return {
+        "unique_state_hash_count": len(unique_hashes),
+        "repeated_state_hash_count": max(0, len(rows) - len(unique_hashes)),
+        "state_hash_counts": _value_counts(state_hashes),
+        "label_policy_counts": _value_counts([str(row.get("label_policy", "")) for row in rows]),
+        "label_semantics_counts": _value_counts([str(row.get("label_semantics", "")) for row in rows]),
+        "target_variance": {
+            target: {
+                "variance": data["variance"],
+                "unique_value_count": data["unique_value_count"],
+                "unique_values": data["unique_values"],
+                "status": data["status"],
+            }
+            for target, data in target_summaries.items()
+        },
+        "target_summaries": target_summaries,
+        "multivariable_regression": _multivariable_regression_summary(rows),
+    }
+
+
+def _density_speed_collinearity(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    z = _numeric_column(rows, "Z_H_R")
+    density = _numeric_column(rows, "density_imbalance")
+    speed = _numeric_column(rows, "speed_difference")
+    density_corr = _pearson(density, z)
+    speed_corr = _pearson(speed, z)
+    near_perfect_threshold = 0.999
+    return {
+        "density_imbalance_vs_Z_H_R": density_corr,
+        "speed_difference_vs_Z_H_R": speed_corr,
+        "near_perfect_threshold": near_perfect_threshold,
+        "density_near_perfect_collinear": abs(density_corr) >= near_perfect_threshold,
+        "speed_near_perfect_collinear": abs(speed_corr) >= near_perfect_threshold,
+        "claim_guidance": (
+            "do_not_claim_Z_superior_to_density_speed_in_this_batch"
+            if abs(density_corr) >= near_perfect_threshold or abs(speed_corr) >= near_perfect_threshold
+            else "density_speed_not_nearly_perfectly_collinear_with_Z"
+        ),
+    }
+
+
+def _multivariable_regression_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    controls = ["D_H", "G_H", "density_imbalance", "speed_difference"]
+    control_matrix = [[float(row[column]) for column in controls] for row in rows]
+    z_values = _numeric_column(rows, "Z_H_R")
+    z_residual = _residuals_against_controls(z_values, control_matrix)
+    out: dict[str, Any] = {}
+    for target in S0_OUTCOME_TARGET_COLUMNS:
+        target_values = _numeric_column(rows, target)
+        variance = _variance(target_values)
+        if variance == 0.0:
+            out[target] = {
+                "status": "no_evidence_constant_target",
+                "controls": controls,
+                "z_partial_correlation": None,
+                "z_partial_r_squared": None,
+                "full_model_status": "skipped_constant_target",
+                "full_model_r_squared": 0.0,
+                "full_model_coefficients": {},
+            }
+            continue
+        full_predictors = ["Z_H_R", *controls]
+        full_matrix = [[float(row[column]) for column in full_predictors] for row in rows]
+        full_model = _linear_regression(full_matrix, target_values)
+        target_residual = _residuals_against_controls(target_values, control_matrix)
+        if z_residual is None or target_residual is None:
+            partial = None
+            partial_r2 = None
+            partial_status = "singular_controls"
+        else:
+            partial = _pearson(z_residual, target_residual)
+            partial_r2 = partial * partial
+            partial_status = "ok"
+        out[target] = {
+            "status": partial_status,
+            "controls": controls,
+            "full_predictors": full_predictors,
+            "z_partial_correlation": partial,
+            "z_partial_r_squared": partial_r2,
+            "full_model_status": full_model["status"],
+            "full_model_r_squared": full_model["r_squared"],
+            "full_model_coefficients": dict(zip(["intercept", *full_predictors], full_model["coefficients"]))
+            if full_model["coefficients"]
+            else {},
+        }
+    return out
+
+
+def _raw_gap_illusion_audit(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    unique_hashes = sorted({str(row.get("state_hash", "")) for row in rows})
+    return {
+        "row_count": len(rows),
+        "unique_state_hash_count": len(unique_hashes),
+        "strata_counts": _strata_counts(rows),
+        "reason_code_distribution": _reason_code_distribution(rows),
+        "contains_raw_high_z_high": any(row.get("s0_stratum") == "raw-high/Z-high" for row in rows),
+        "contains_raw_high_z_low": any(row.get("s0_stratum") == "raw-high/Z-low" for row in rows),
+    }
+
+
+def _reason_code_distribution(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        raw_reasons = row.get("dominant_invalid_reasons", {})
+        if isinstance(raw_reasons, str):
+            try:
+                raw_reasons = json.loads(raw_reasons) if raw_reasons else {}
+            except json.JSONDecodeError:
+                raw_reasons = {}
+        if not isinstance(raw_reasons, Mapping):
+            continue
+        for reason, count in raw_reasons.items():
+            counts[str(reason)] = counts.get(str(reason), 0) + int(count)
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _wave3b_gate_report(
+    rows: Sequence[Mapping[str, Any]],
+    raw_gap_illusion_rows: Sequence[Mapping[str, Any]],
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    target_variance = summary.get("target_variance", {})
+    collinearity = summary.get("density_speed_collinearity", {})
+    minimal_pass = (
+        bool(rows)
+        and int(summary.get("raw_high_z_high_count", 0)) > 0
+        and int(summary.get("raw_high_z_low_count", 0)) > 0
+        and set(summary.get("label_policy_counts", {})) == {S0_LABEL_POLICY}
+        and "label_semantics_counts" in summary
+    )
+    unique_count = int(summary.get("unique_state_hash_count", 0))
+    scientific_status = "conditional scientific pass"
+    if unique_count < 32:
+        scientific_status = "conditional_fail_small_effective_N"
+    if any(
+        data.get("status") == "no_evidence_constant_target"
+        for data in target_variance.values()
+    ):
+        scientific_status = "conditional scientific pass with blocked constant-target claims"
+    allowed_claims = [
+        "implementation pipeline generated formal S0 joined artifacts",
+        "fixed FIFO_no_production label policy was applied",
+        "diagnostic_proxy label semantics can support mechanism-entry checks",
+        "raw-gap illusion witness exists when raw-high/Z-high and raw-high/Z-low both appear",
+    ]
+    blocked_claims = []
+    if summary.get("label_semantics_counts", {}).get(S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY, 0) > 0:
+        blocked_claims.append("independent future 30s rollout performance proof")
+    for target, data in target_variance.items():
+        if data.get("status") == "no_evidence_constant_target":
+            blocked_claims.append(f"predictor superiority on {target}")
+    if collinearity.get("claim_guidance") == "do_not_claim_Z_superior_to_density_speed_in_this_batch":
+        blocked_claims.append("Z_H_R superiority over density/speed in this batch")
+    if unique_count < 32:
+        blocked_claims.append("population-level inference from effective sample size")
+    return {
+        "implementation_status": "implementation pass" if minimal_pass else "fail",
+        "scientific_status": scientific_status,
+        "row_count": len(rows),
+        "unique_state_hash_count": unique_count,
+        "repeated_state_hash_count": int(summary.get("repeated_state_hash_count", 0)),
+        "strata_counts": summary.get("strata_counts", {}),
+        "label_policy_counts": summary.get("label_policy_counts", {}),
+        "label_semantics_counts": summary.get("label_semantics_counts", {}),
+        "target_variance": target_variance,
+        "density_speed_collinearity": collinearity,
+        "raw_gap_illusion_subset_row_count": len(raw_gap_illusion_rows),
+        "raw_gap_illusion_unique_state_count": summary.get("raw_gap_illusion_audit", {}).get(
+            "unique_state_hash_count",
+            0,
+        ),
+        "allowed_claims": allowed_claims,
+        "blocked_claims": sorted(set(blocked_claims)),
+    }
+
+
+def _value_counts(values: Sequence[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _target_summary_columns() -> list[str]:
+    return [
+        "target",
+        "predictor",
+        "status",
+        "row_count",
+        "target_variance",
+        "pearson_correlation",
+        "rank_correlation",
+        "regression_intercept",
+        "regression_slope",
+        "regression_r_squared",
+        "label_policy",
+        "label_semantics_counts",
+    ]
+
+
+def _target_summary_rows(target_summaries: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for target, data in target_summaries.items():
+        if data["status"] == "no_evidence_constant_target":
+            rows.append(
+                {
+                    "target": target,
+                    "predictor": "",
+                    "status": data["status"],
+                    "row_count": data["row_count"],
+                    "target_variance": data["variance"],
+                    "pearson_correlation": "",
+                    "rank_correlation": "",
+                    "regression_intercept": "",
+                    "regression_slope": "",
+                    "regression_r_squared": "",
+                    "label_policy": S0_LABEL_POLICY,
+                    "label_semantics_counts": "",
+                }
+            )
+            continue
+        for predictor in sorted(data["pearson_correlation"]):
+            regression = data["simple_regression"][predictor]
+            rows.append(
+                {
+                    "target": target,
+                    "predictor": predictor,
+                    "status": data["status"],
+                    "row_count": data["row_count"],
+                    "target_variance": data["variance"],
+                    "pearson_correlation": data["pearson_correlation"][predictor],
+                    "rank_correlation": data["rank_correlation"][predictor],
+                    "regression_intercept": regression["intercept"],
+                    "regression_slope": regression["slope"],
+                    "regression_r_squared": regression["r_squared"],
+                    "label_policy": S0_LABEL_POLICY,
+                    "label_semantics_counts": "",
+                }
+            )
+    return rows
+
+
+def _target_variance_columns() -> list[str]:
+    return ["target", "status", "variance", "unique_value_count", "unique_values"]
+
+
+def _target_variance_rows(target_variance: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": target,
+            "status": data["status"],
+            "variance": data["variance"],
+            "unique_value_count": data["unique_value_count"],
+            "unique_values": data["unique_values"],
+        }
+        for target, data in sorted(target_variance.items())
+    ]
+
+
+def _multivariable_summary_columns() -> list[str]:
+    return [
+        "target",
+        "status",
+        "controls",
+        "z_partial_correlation",
+        "z_partial_r_squared",
+        "full_model_status",
+        "full_model_r_squared",
+        "full_model_coefficients",
+    ]
+
+
+def _multivariable_summary_rows(multivariable: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": target,
+            "status": data["status"],
+            "controls": data["controls"],
+            "z_partial_correlation": data["z_partial_correlation"],
+            "z_partial_r_squared": data["z_partial_r_squared"],
+            "full_model_status": data["full_model_status"],
+            "full_model_r_squared": data["full_model_r_squared"],
+            "full_model_coefficients": data["full_model_coefficients"],
+        }
+        for target, data in sorted(multivariable.items())
+    ]
+
+
 def _write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> None:
     with Path(path).open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=list(columns), extrasaction="ignore")
@@ -1048,7 +1575,10 @@ __all__ = [
     "MatchingEdge",
     "MatchingResult",
     "S0_LABEL_POLICY",
+    "S0_LABEL_SEMANTICS_DIAGNOSTIC_PROXY",
+    "S0_LABEL_SEMANTICS_INDEPENDENT_ROLLOUT",
     "ToyS0Sample",
+    "analyze_s0_targets",
     "analyze_predictor_outcome",
     "build_matching_cost_matrix",
     "build_matching_edges",

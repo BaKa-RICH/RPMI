@@ -217,29 +217,104 @@ def apply_template_perturbation(
 def generate_s0_samples(config: ScenarioConfig, N: int = 16) -> list[TrafficState]:
     """Generate stratified S0 inventory-mechanism samples."""
 
+    return [generate_state(sample_config) for sample_config in generate_s0_sample_configs(config, N)]
+
+
+def generate_s0_sample_configs(config: ScenarioConfig, N: int = 16) -> list[ScenarioConfig]:
+    """Generate stratified S0 configs with raw-gap and deficit factors crossed."""
+
     states: list[TrafficState] = []
+    configs: list[ScenarioConfig] = []
     for index in range(N):
         raw_high = index % 2 == 0
         deficit_high = (index // 2) % 2 == 0
-        sample_config = make_scenario_config(
-            "S0",
-            seed=config.seed + index,
-            road=config.road,
-            simulation=config.simulation,
-            vehicles={
-                **config.vehicles,
-                "gap_widths": [30.0, 28.0] if raw_high else [12.0, 10.0],
-                "ramp_start_x": -500.0 if deficit_high else 78.0,
-                "ramp_speed": 0.0 if deficit_high else 12.0,
-                "ramp_count": 2 if deficit_high else 1,
-                "ramp_end_x": 120.0,
-            },
-            ramp=config.ramp,
-            mechanism_targets=config.mechanism_targets,
-            readiness_targets=config.readiness_targets,
+        configs.append(
+            make_scenario_config(
+                "S0",
+                seed=config.seed + index,
+                road=config.road,
+                simulation=config.simulation,
+                vehicles={
+                    **config.vehicles,
+                    "gap_widths": [30.0, 28.0] if raw_high else [12.0, 10.0],
+                    "ramp_start_x": -500.0 if deficit_high else 78.0,
+                    "ramp_speed": 0.0 if deficit_high else 12.0,
+                    "ramp_count": 2 if deficit_high else 1,
+                    "ramp_end_x": 120.0,
+                },
+                ramp=config.ramp,
+                mechanism_targets={
+                    **config.mechanism_targets,
+                    "s0_factor_controls": {
+                        "raw_gap": "high" if raw_high else "low",
+                        "deficit": "high" if deficit_high else "low",
+                        "density": "template",
+                        "speed": "template",
+                    },
+                    "s0_sample_mode": "formal_stratified",
+                },
+                readiness_targets=config.readiness_targets,
+            )
         )
-        states.append(generate_state(sample_config))
-    return states
+    return configs
+
+
+def generate_s0_deconfounded_samples(config: ScenarioConfig, N: int = 32) -> list[TrafficState]:
+    """Generate S0 evidence-hardening states with crossed control factors."""
+
+    return [generate_state(sample_config) for sample_config in generate_s0_deconfounded_sample_configs(config, N)]
+
+
+def generate_s0_deconfounded_sample_configs(config: ScenarioConfig, N: int = 32) -> list[ScenarioConfig]:
+    """Generate S0 configs crossing raw gap, deficit, density, and speed controls.
+
+    The generator still uses deterministic no-action diagnostics. Seeded jitter is
+    deliberately enabled so repeated factor cells have distinct state hashes.
+    """
+
+    configs: list[ScenarioConfig] = []
+    for index in range(N):
+        raw_high = index % 2 == 0
+        deficit_high = (index // 2) % 2 == 0
+        density_high = (index // 4) % 2 == 0
+        speed_high = (index // 8) % 2 == 0
+        replicate = index // 16
+        vehicles = {
+            **config.vehicles,
+            "gap_widths": [30.0, 28.0] if raw_high else [12.0, 10.0],
+            "ramp_start_x": -500.0 if deficit_high else 78.0,
+            "ramp_speed": 0.0 if deficit_high else 12.0,
+            "ramp_count": 2 if deficit_high else 1,
+            "ramp_end_x": 120.0,
+            "inner_receiving_gap_count": 0 if density_high else 3,
+            "front_speed_offsets": [1.0, 0.0] if speed_high else [0.0, -0.5],
+            "rear_speed_offsets": [-1.0, 0.0] if speed_high else [0.5, 0.0],
+            "x_jitter": max(float(config.vehicles.get("x_jitter", 0.0)), 0.35),
+            "v_jitter": max(float(config.vehicles.get("v_jitter", 0.0)), 0.08),
+        }
+        configs.append(
+            make_scenario_config(
+                "S0",
+                seed=config.seed + index,
+                road=config.road,
+                simulation=config.simulation,
+                vehicles=vehicles,
+                ramp=config.ramp,
+                mechanism_targets={
+                    **config.mechanism_targets,
+                    "s0_factor_controls": {
+                        "raw_gap": "high" if raw_high else "low",
+                        "deficit": "high" if deficit_high else "low",
+                        "density": "high" if density_high else "low",
+                        "speed": "high" if speed_high else "low",
+                        "replicate": replicate,
+                    },
+                    "s0_sample_mode": "deconfounded",
+                },
+                readiness_targets=config.readiness_targets,
+            )
+        )
+    return configs
 
 
 def generate_s2_near_critical(config: ScenarioConfig) -> TrafficState:
@@ -980,6 +1055,9 @@ __all__ = [
     "compute_readiness_metrics",
     "diagnostic_rows_for_readiness",
     "generate_initial_vehicles",
+    "generate_s0_deconfounded_sample_configs",
+    "generate_s0_deconfounded_samples",
+    "generate_s0_sample_configs",
     "generate_s0_samples",
     "generate_s2_near_critical",
     "generate_s5_boundary_templates",

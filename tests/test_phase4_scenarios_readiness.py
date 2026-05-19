@@ -12,6 +12,7 @@ from rpmi.scenarios import (
     compute_readiness_metrics,
     diagnostic_rows_for_readiness,
     generate_initial_vehicles,
+    generate_s0_deconfounded_samples,
     generate_s0_samples,
     generate_s2_near_critical,
     generate_s5_boundary_templates,
@@ -98,6 +99,17 @@ def test_s0_generator_produces_stratified_readiness_inputs():
     assert any(report.metrics["G_H"] >= 2 and report.metrics["Z_R_0"] > 0 for report in reports)
     assert len({report.metrics["G_H"] for report in reports}) >= 2
     assert any(report.metrics["Z_R_0"] == 0 for report in reports)
+
+
+def test_s0_deconfounded_generator_produces_unique_states():
+    config = make_scenario_config("S0", seed=10)
+    states = generate_s0_deconfounded_samples(config, N=32)
+    reports = [readiness_check(compute_readiness_metrics(state, config), config) for state in states]
+
+    assert len(states) == 32
+    assert len({report.metrics["state_hash"] for report in reports}) == 32
+    assert any(report.metrics["G_H"] >= 2 and report.metrics["Z_R_0"] > 0 for report in reports)
+    assert any(report.metrics["G_H"] >= 2 and report.metrics["Z_R_0"] == 0 for report in reports)
 
 
 def test_s2_s5_s6_template_helpers_return_expected_shapes():
