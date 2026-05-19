@@ -1,4 +1,5 @@
 import csv
+import json
 
 import pytest
 
@@ -18,9 +19,11 @@ from rpmi.matching import (
     edges_conflict,
     join_predictor_outcome_rows,
     matching_result_to_rows,
+    run_formal_s0_batch_rerun,
     solve_matching_slot_only_debug,
     solve_matching_v0_greedy_conflict,
 )
+from rpmi.scenarios import make_scenario_config
 
 
 def edge(
@@ -207,3 +210,46 @@ def test_matching_csv_rows_are_writable(tmp_path):
     assert rows[0]["matching_id"] == "m_greedy_conflict"
     assert rows[0]["matched"] == "True"
     assert rows[0]["weight"] == "1.0"
+
+
+def test_formal_s0_batch_rerun_exports_joined_table(tmp_path):
+    config = make_scenario_config("S0", seed=10)
+
+    result = run_formal_s0_batch_rerun(config, tmp_path, N=16)
+
+    assert result.joined_path == tmp_path / "s0_predictor_outcome_joined.csv"
+    assert result.joined_path.exists()
+    assert result.predictor_path.exists()
+    assert result.outcome_path.exists()
+    assert result.summary_path.exists()
+    assert result.raw_gap_illusion_subset_path.exists()
+    assert len(result.joined_rows) == 16
+    assert {row["label_policy"] for row in result.joined_rows} == {"FIFO_no_production"}
+    assert any(row["s0_stratum"] == "raw-high/Z-high" for row in result.joined_rows)
+    assert any(row["s0_stratum"] == "raw-high/Z-low" for row in result.joined_rows)
+
+    with result.joined_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+
+    assert len(rows) == 16
+    assert {row["label_policy"] for row in rows} == {"FIFO_no_production"}
+    assert "raw-high/Z-high" in {row["s0_stratum"] for row in rows}
+    assert "raw-high/Z-low" in {row["s0_stratum"] for row in rows}
+
+
+def test_formal_s0_batch_summary_and_illusion_subset(tmp_path):
+    result = run_formal_s0_batch_rerun(make_scenario_config("S0", seed=10), tmp_path, N=16)
+
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    with result.raw_gap_illusion_subset_path.open(newline="", encoding="utf-8") as file:
+        illusion_rows = list(csv.DictReader(file))
+
+    assert summary["row_count"] == 16
+    assert summary["label_policy"] == "FIFO_no_production"
+    assert summary["raw_high_z_high_count"] > 0
+    assert summary["raw_high_z_low_count"] > 0
+    assert "Z_H_R" in summary["pearson_correlation"]
+    assert "Z_H_R" in summary["rank_correlation"]
+    assert "Z_H_R" in summary["simple_regression"]
+    assert illusion_rows
+    assert all(row["raw_gap_stratum"] == "raw-high" for row in illusion_rows)
