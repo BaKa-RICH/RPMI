@@ -23,9 +23,18 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
     "readiness_summary.csv": SHARED_COLUMNS
     + [
         "scenario_id",
+        "seed",
         "algorithm_id",
         "readiness_pass",
         "readiness_reason",
+        "G_H",
+        "D_H",
+        "S_R_0",
+        "Z_R_0",
+        "near_miss_edge_count",
+        "raw_gap_illusion_count",
+        "failed_attempts",
+        "algorithm_independent",
     ],
     "vehicles_step.csv": SHARED_COLUMNS
     + [
@@ -235,6 +244,15 @@ def append_matching_rows(
     """Append diagnostic matching rows to ``matching.csv``."""
 
     append_csv_rows(path, CSV_LOG_SCHEMAS["matching.csv"], rows)
+
+
+def append_readiness_summary_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append Wave 4 readiness rows to ``readiness_summary.csv``."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["readiness_summary.csv"], rows)
 
 
 def _csv_value(value: object) -> object:
