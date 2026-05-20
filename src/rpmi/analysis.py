@@ -5,42 +5,93 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import csv
+from datetime import datetime, timezone
 import json
 
+from rpmi.logging_schema import CSV_LOG_SCHEMAS
 
-AGGREGATE_METRIC_COLUMNS = [
+
+METRICS_SCHEMA_VERSION = "metrics_v2.1"
+READINESS_SCHEMA_VERSION = "readiness_v2.1"
+EVIDENCE_PACKAGE_VERSION = "wave_6A0_v2.1"
+
+
+GLOBAL_EVIDENCE_COLUMNS = [
+    "batch_id",
     "run_id",
+    "unique_run_id",
     "scenario_id",
     "seed",
     "algorithm_id",
-    "status",
     "decision_mode",
     "state_hash",
+    "config_hash",
+    "code_version",
+    "metrics_schema_version",
+    "readiness_schema_version",
+    "evidence_package_version",
+]
+
+
+AGGREGATE_METRIC_COLUMNS = [
+    *GLOBAL_EVIDENCE_COLUMNS,
+    "status",
     "readiness_pass",
     "readiness_reason",
+    "readiness_fail_reason",
+    "D_H",
     "selected_action_id",
     "selected_action_type",
     "baseline_J",
     "selected_J",
     "selected_RCMV",
+    "rcmv_positive_margin",
+    "positive_RCMV_candidate_count",
+    "candidate_action_count",
     "baseline_S_R",
     "baseline_Z_R",
     "selected_S_R",
     "selected_Z_R",
+    "delta_S_R",
+    "delta_Z_R",
     "mean_ramp_delay",
     "merge_success_count",
     "failed_reservation_count",
+    "generated_reservation_count",
+    "planned_reservation_count",
+    "reservation_count",
     "failed_reservation_rate",
+    "failed_reservation_denominator",
+    "merge_success_rate_over_demand",
+    "predicted_unserved_demand_count",
+    "predicted_unserved_demand_rate",
+    "realized_unserved_demand_count",
+    "realized_unserved_demand_rate",
+    "unserved_demand_count",
+    "no_reservation_due_to_invalid_supply_count",
+    "no_reservation_due_to_invalid_supply_rate",
+    "waiting_or_unserved_penalty",
+    "denominator_warning_flag",
+    "denominator_notes",
     "slot_expiration_count",
     "slot_expiration_rate",
     "mean_RD_matched",
     "hard_brake_count",
     "max_wave_amplitude",
     "no_fallback_invalid_event_count",
+    "failure_joinable_rate",
+    "failure_join_key",
     "throughput_outflow",
     "mean_Z_R",
     "production_cost_sum",
     "stale_reservation_count",
+    "stale_reservation_harm",
+    "stale_reservation_harm_reason",
+    "action_conditioned_gain",
+    "action_conditioned_gain_reason",
+    "rd_decision_changed_flag",
+    "raw_gap_illusion_flag",
+    "selected_matched_edge_ids",
     "uses_inventory",
     "uses_rd",
     "uses_near_miss",
@@ -55,33 +106,51 @@ AGGREGATE_METRIC_COLUMNS = [
 
 
 FAILURE_SUMMARY_COLUMNS = [
-    "run_id",
-    "scenario_id",
-    "seed",
-    "algorithm_id",
+    *GLOBAL_EVIDENCE_COLUMNS,
+    "run_status",
     "failure_source",
+    "decision_context_id",
     "reservation_id",
     "event_id",
     "event_type",
     "status",
     "failure_reason",
+    "failure_stage",
     "linked_action_id",
     "linked_edge_id",
+    "action_id",
     "ramp_id",
     "edge_id",
     "slot_id",
+    "vehicle_id",
+    "planned_tau",
+    "actual_time",
+    "actual_margin_front",
+    "actual_margin_rear",
+    "denominator_scope",
+    "demand_id",
+    "failure_join_key",
     "severity",
 ]
 
 
 RCMV_TRACE_COLUMNS = [
-    "run_id",
-    "scenario_id",
-    "seed",
-    "algorithm_id",
+    *GLOBAL_EVIDENCE_COLUMNS,
     "decision_context_id",
-    "state_hash",
     "action_id",
+    "action_type",
+    "nominal_edge_id",
+    "boundary_type",
+    "near_miss_type",
+    "requested_delta_W",
+    "delta_W_target",
+    "T_prod",
+    "u_front",
+    "u_rear",
+    "profile_clip_flag",
+    "action_profile_feasible",
+    "rejected_before_rollout",
+    "reject_reason",
     "J",
     "Z_bar",
     "D_bar",
@@ -97,6 +166,45 @@ RCMV_TRACE_COLUMNS = [
     "rejected_by_theta",
     "cost_components_json",
     "matched_rd_sum",
+]
+
+
+READINESS_SUMMARY_COLUMNS = [
+    *GLOBAL_EVIDENCE_COLUMNS,
+    "G_H",
+    "raw_time_expanded_slot_count",
+    "D_H",
+    "S_R_0",
+    "Z_R_0",
+    "reservable_edge_count",
+    "matched_edge_count",
+    "total_edge_count",
+    "near_miss_edge_count",
+    "boundary_CAV_HDV",
+    "boundary_HDV_CAV",
+    "boundary_CAV_CAV",
+    "boundary_HDV_HDV",
+    "boundary_cav_available_count",
+    "inner_receiving_gap_count",
+    "raw_gap_illusion_count",
+    "dominant_invalid_reasons",
+    "readiness_pass",
+    "readiness_fail_reasons",
+    "readiness_reason",
+    "failed_attempts",
+    "algorithm_independent",
+]
+
+
+STATE_HASH_FAIRNESS_COLUMNS = [
+    "batch_id",
+    "scenario_id",
+    "seed",
+    "algorithm_count",
+    "unique_state_hash_count",
+    "state_hashes_json",
+    "fairness_pass",
+    "failed_algorithm_ids",
 ]
 
 
@@ -130,23 +238,31 @@ def aggregate_metrics(
 def aggregate_failures(
     run_dirs: Sequence[str | Path],
     output_path: str | Path | None = None,
+    *,
+    status_filter: str | None = None,
 ) -> Path:
-    """Collect reservation failures and no-fallback events into one CSV."""
+    """Collect reservation, readiness, and realized-event failures."""
 
     out_path = Path(output_path) if output_path is not None else Path("failure_summary.csv")
     rows: list[dict[str, Any]] = []
     for run_dir in run_dirs:
         run_path = Path(run_dir)
         metrics = _read_metrics(run_path)
+        if status_filter is not None and metrics.get("status") != status_filter:
+            continue
         rows.extend(_reservation_failure_rows(run_path, metrics))
         rows.extend(_event_failure_rows(run_path, metrics))
         if metrics.get("status") == "readiness_failed":
             rows.append(
                 {
                     **_metric_context(metrics),
+                    "run_status": "readiness_failed",
                     "failure_source": "readiness",
                     "status": "readiness_failed",
                     "failure_reason": metrics.get("readiness_reason", ""),
+                    "failure_stage": "readiness",
+                    "denominator_scope": "readiness",
+                    "failure_join_key": metrics.get("failure_join_key", ""),
                 }
             )
     _write_csv(out_path, rows, FAILURE_SUMMARY_COLUMNS)
@@ -164,13 +280,30 @@ def collect_rcmv_trace(
     for run_dir in run_dirs:
         run_path = Path(run_dir)
         metrics = _read_metrics(run_path)
+        action_by_id = {
+            row.get("action_id", ""): row for row in _read_csv(run_path / "actions.csv")
+        }
         for row in _read_csv(run_path / "action_evaluations.csv"):
+            action_row = action_by_id.get(row.get("action_id", ""), {})
             rows.append(
                 {
                     **_metric_context(metrics),
                     "decision_context_id": row.get("decision_context_id", ""),
                     "state_hash": row.get("state_hash", metrics.get("state_hash", "")),
                     "action_id": row.get("action_id", ""),
+                    "action_type": action_row.get("action_type", ""),
+                    "nominal_edge_id": action_row.get("nominal_edge_id", ""),
+                    "boundary_type": action_row.get("boundary_type", ""),
+                    "near_miss_type": _near_miss_type_from_action(action_row),
+                    "requested_delta_W": action_row.get("requested_delta_W", ""),
+                    "delta_W_target": action_row.get("delta_W_target", ""),
+                    "T_prod": action_row.get("T_prod", ""),
+                    "u_front": action_row.get("u_front", ""),
+                    "u_rear": action_row.get("u_rear", ""),
+                    "profile_clip_flag": action_row.get("profile_clip_flag", ""),
+                    "action_profile_feasible": action_row.get("action_profile_feasible", ""),
+                    "rejected_before_rollout": action_row.get("rejected_before_rollout", ""),
+                    "reject_reason": action_row.get("reject_reason", ""),
                     "J": row.get("J", ""),
                     "Z_bar": row.get("Z_bar", ""),
                     "D_bar": row.get("D_bar", ""),
@@ -254,11 +387,203 @@ def generate_summary_tables(
     }
 
 
+def aggregate_readiness(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path | None = None,
+    *,
+    status_filter: str | None = None,
+) -> Path:
+    """Collect per-run readiness summaries with Wave 6A.0 fields."""
+
+    out_path = Path(output_path) if output_path is not None else Path("readiness_summary.csv")
+    rows: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        if status_filter is not None and metrics.get("status") != status_filter:
+            continue
+        for row in _read_csv(run_path / "readiness_summary.csv"):
+            rows.append({**_metric_context(metrics), **row})
+    _write_csv(out_path, rows, READINESS_SUMMARY_COLUMNS)
+    return out_path
+
+
+def write_state_hash_fairness_csv(
+    fairness: Mapping[str, Any],
+    output_path: str | Path,
+    *,
+    batch_id: str = "",
+) -> Path:
+    """Write grouped state-hash fairness rows for Gate D0 inputs."""
+
+    rows = []
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in fairness.get("rows", []):
+        key = (str(row.get("scenario_id", "")), str(row.get("seed", "")))
+        item = grouped.setdefault(
+            key,
+            {
+                "batch_id": batch_id,
+                "scenario_id": key[0],
+                "seed": key[1],
+                "algorithm_ids": set(),
+                "state_hashes": set(),
+                "failed_algorithm_ids": set(),
+            },
+        )
+        item["algorithm_ids"].add(str(row.get("algorithm_id", "")))
+        item["state_hashes"].add(str(row.get("state_hash", "")))
+    mismatches = {
+        (str(item.get("scenario_id", "")), str(item.get("seed", "")))
+        for item in fairness.get("mismatches", [])
+    }
+    for key, item in sorted(grouped.items()):
+        failed = item["algorithm_ids"] if key in mismatches else set()
+        hashes = sorted(item["state_hashes"])
+        rows.append(
+            {
+                "batch_id": batch_id,
+                "scenario_id": item["scenario_id"],
+                "seed": item["seed"],
+                "algorithm_count": len(item["algorithm_ids"]),
+                "unique_state_hash_count": len(hashes),
+                "state_hashes_json": hashes,
+                "fairness_pass": len(hashes) == 1,
+                "failed_algorithm_ids": sorted(failed),
+            }
+        )
+    out_path = Path(output_path)
+    _write_csv(out_path, rows, STATE_HASH_FAIRNESS_COLUMNS)
+    return out_path
+
+
+def build_evidence_package(
+    run_dirs: Sequence[str | Path],
+    *,
+    package_dir: str | Path,
+    batch_id: str,
+    fairness: Mapping[str, Any] | None = None,
+    batch_manifest_path: str | Path | None = None,
+) -> dict[str, Path]:
+    """Create the Wave 6A.0 layered evidence package."""
+
+    root = Path(package_dir)
+    main_dir = root / "main_batch"
+    readiness_dir = root / "readiness_fail"
+    positive_dir = root / "positive_rcmv_micro"
+    gate_dir = root / "gate_D0_input"
+    for directory in (main_dir, readiness_dir, positive_dir, gate_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    completed_dirs = _filter_run_dirs_by_status(run_dirs, "completed")
+    readiness_failed_dirs = _filter_run_dirs_by_status(run_dirs, "readiness_failed")
+    positive_dirs = [
+        run_dir
+        for run_dir in completed_dirs
+        if _float(_read_metrics(Path(run_dir)).get("selected_RCMV")) > 0.0
+    ]
+
+    paths: dict[str, Path] = {}
+    paths["main_batch_manifest"] = main_dir / "batch_manifest.csv"
+    if batch_manifest_path is not None and Path(batch_manifest_path).exists():
+        _copy_file(Path(batch_manifest_path), paths["main_batch_manifest"])
+    else:
+        _write_manifest(paths["main_batch_manifest"], run_dirs)
+
+    paths["aggregate_metrics_completed"] = aggregate_metrics(
+        completed_dirs,
+        main_dir / "aggregate_metrics_completed.csv",
+    )
+    paths["failure_summary_main_batch"] = aggregate_failures(
+        completed_dirs,
+        main_dir / "failure_summary_main_batch.csv",
+    )
+    paths["rcmv_trace"] = collect_rcmv_trace(completed_dirs, main_dir / "rcmv_trace.csv")
+    paths["readiness_summary"] = aggregate_readiness(
+        run_dirs,
+        main_dir / "readiness_summary.csv",
+    )
+    paths["state_hash_fairness"] = write_state_hash_fairness_csv(
+        fairness or {},
+        main_dir / "state_hash_fairness.csv",
+        batch_id=batch_id,
+    )
+    paths["main_schema_manifest"] = _write_schema_manifest(main_dir / "schema_manifest.json")
+
+    paths["aggregate_metrics_readiness_fail"] = aggregate_metrics(
+        readiness_failed_dirs,
+        readiness_dir / "aggregate_metrics_readiness_fail.csv",
+    )
+    paths["failure_summary_readiness_fail"] = aggregate_failures(
+        readiness_failed_dirs,
+        readiness_dir / "failure_summary_readiness_fail.csv",
+    )
+    paths["readiness_failures"] = aggregate_readiness(
+        readiness_failed_dirs,
+        readiness_dir / "readiness_failures.csv",
+    )
+
+    paths["positive_rcmv_manifest"] = _write_positive_manifest(
+        positive_dir / "positive_rcmv_manifest.json",
+        positive_dirs,
+        batch_id=batch_id,
+    )
+    paths["positive_rcmv_aggregate_metrics"] = aggregate_metrics(
+        positive_dirs,
+        positive_dir / "positive_rcmv_aggregate_metrics.csv",
+    )
+    paths["positive_rcmv_failure_summary"] = aggregate_failures(
+        positive_dirs,
+        positive_dir / "positive_rcmv_failure_summary.csv",
+    )
+    paths["positive_rcmv_rcmv_trace"] = collect_rcmv_trace(
+        positive_dirs,
+        positive_dir / "positive_rcmv_rcmv_trace.csv",
+    )
+    paths["positive_rcmv_action_evaluations"] = _collect_raw_csv(
+        positive_dirs,
+        "action_evaluations.csv",
+        positive_dir / "positive_rcmv_action_evaluations.csv",
+    )
+    paths["positive_rcmv_reservations"] = _collect_raw_csv(
+        positive_dirs,
+        "reservations.csv",
+        positive_dir / "positive_rcmv_reservations.csv",
+    )
+
+    paths["gate_manifest"] = _write_gate_manifest(
+        gate_dir / "gate_D0_manifest.json",
+        batch_id=batch_id,
+    )
+    _copy_file(paths["aggregate_metrics_completed"], gate_dir / "aggregate_metrics_completed.csv")
+    _copy_file(paths["failure_summary_main_batch"], gate_dir / "failure_summary_main_batch.csv")
+    _copy_file(paths["failure_summary_readiness_fail"], gate_dir / "failure_summary_readiness_fail.csv")
+    _copy_file(paths["positive_rcmv_aggregate_metrics"], gate_dir / "positive_rcmv_aggregate_metrics.csv")
+    _copy_file(paths["positive_rcmv_failure_summary"], gate_dir / "positive_rcmv_failure_summary.csv")
+    _copy_file(paths["positive_rcmv_rcmv_trace"], gate_dir / "positive_rcmv_rcmv_trace.csv")
+    _copy_file(paths["state_hash_fairness"], gate_dir / "state_hash_fairness.csv")
+    paths["paper_claim_support_table"] = _write_paper_claim_support_table(
+        gate_dir / "paper_claim_support_table.csv",
+        positive_dirs=positive_dirs,
+        fairness=fairness or {},
+    )
+
+    paths["evidence_index"] = _write_evidence_index(
+        root / "evidence_index.json",
+        batch_id=batch_id,
+        run_dirs=run_dirs,
+        positive_dirs=positive_dirs,
+        fairness=fairness or {},
+    )
+    paths["schema_manifest"] = _write_schema_manifest(root / "schema_manifest.json")
+    return paths
+
+
 def _metrics_row(run_dir: str | Path) -> dict[str, Any]:
     run_path = Path(run_dir)
     metrics = _read_metrics(run_path)
     row = {column: metrics.get(column, "") for column in AGGREGATE_METRIC_COLUMNS}
-    row["run_id"] = metrics.get("run_id") or run_path.name
+    row.update(_derived_metric_fields(metrics, run_path))
     return row
 
 
@@ -269,7 +594,72 @@ def _read_metrics(run_path: Path) -> dict[str, Any]:
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     metrics = payload.get("metrics", payload)
     metrics.setdefault("run_id", run_path.name)
+    metrics.setdefault("unique_run_id", metrics.get("run_id", run_path.name))
+    metrics.setdefault("metrics_schema_version", METRICS_SCHEMA_VERSION)
+    metrics.setdefault("readiness_schema_version", READINESS_SCHEMA_VERSION)
+    metrics.setdefault("evidence_package_version", EVIDENCE_PACKAGE_VERSION)
     return metrics
+
+
+def _derived_metric_fields(metrics: Mapping[str, Any], run_path: Path) -> dict[str, Any]:
+    run_id = str(metrics.get("run_id") or run_path.name)
+    D_H = _float(metrics.get("D_H"))
+    selected_Z_R = _float(metrics.get("selected_Z_R"))
+    baseline_Z_R = _float(metrics.get("baseline_Z_R"))
+    selected_S_R = _float(metrics.get("selected_S_R"))
+    baseline_S_R = _float(metrics.get("baseline_S_R"))
+    reservation_count = int(_float(metrics.get("reservation_count")))
+    planned_count = int(_float(metrics.get("planned_reservation_count")))
+    generated = int(_float(metrics.get("generated_reservation_count")))
+    if generated <= 0:
+        generated = reservation_count if reservation_count > 0 else planned_count
+    failed_count = int(_float(metrics.get("failed_reservation_count")))
+    merge_success = int(_float(metrics.get("merge_success_count")))
+    realized_unserved = max(D_H - merge_success, 0.0)
+    warning = generated > 0 and failed_count == 0 and (merge_success == 0 or realized_unserved > 0.0)
+    if not warning:
+        warning = generated == 0 and D_H > 0.0
+    no_reservation_due_to_invalid_supply = max(D_H - generated, 0.0) if generated <= 0 else 0.0
+    return {
+        "batch_id": metrics.get("batch_id", ""),
+        "run_id": run_id,
+        "unique_run_id": metrics.get("unique_run_id") or run_id,
+        "config_hash": metrics.get("config_hash", _read_text(run_path / "config_hash.txt")),
+        "code_version": metrics.get("code_version", _read_text(run_path / "code_version.txt")),
+        "metrics_schema_version": metrics.get("metrics_schema_version", METRICS_SCHEMA_VERSION),
+        "readiness_schema_version": metrics.get("readiness_schema_version", READINESS_SCHEMA_VERSION),
+        "evidence_package_version": metrics.get("evidence_package_version", EVIDENCE_PACKAGE_VERSION),
+        "D_H": D_H,
+        "readiness_fail_reason": metrics.get("readiness_fail_reason", metrics.get("readiness_reason", "")),
+        "generated_reservation_count": generated,
+        "failed_reservation_rate": _rate_float(failed_count, generated),
+        "failed_reservation_denominator": "generated_reservation_count",
+        "merge_success_rate_over_demand": _rate_float(merge_success, D_H),
+        "predicted_unserved_demand_count": metrics.get("predicted_unserved_demand_count", selected_Z_R),
+        "predicted_unserved_demand_rate": _rate_float(selected_Z_R, D_H),
+        "realized_unserved_demand_count": metrics.get("realized_unserved_demand_count", realized_unserved),
+        "realized_unserved_demand_rate": _rate_float(realized_unserved, D_H),
+        "unserved_demand_count": metrics.get("unserved_demand_count", realized_unserved),
+        "no_reservation_due_to_invalid_supply_count": metrics.get(
+            "no_reservation_due_to_invalid_supply_count",
+            no_reservation_due_to_invalid_supply,
+        ),
+        "no_reservation_due_to_invalid_supply_rate": metrics.get(
+            "no_reservation_due_to_invalid_supply_rate",
+            _rate_float(no_reservation_due_to_invalid_supply, D_H),
+        ),
+        "waiting_or_unserved_penalty": metrics.get("waiting_or_unserved_penalty", selected_Z_R),
+        "denominator_warning_flag": metrics.get("denominator_warning_flag", warning),
+        "denominator_notes": metrics.get(
+            "denominator_notes",
+            "failed_reservation_rate uses generated reservations; merge_success_rate_over_demand uses D_H.",
+        ),
+        "delta_S_R": metrics.get("delta_S_R", selected_S_R - baseline_S_R),
+        "delta_Z_R": metrics.get("delta_Z_R", baseline_Z_R - selected_Z_R),
+        "rcmv_positive_margin": metrics.get("rcmv_positive_margin", _float(metrics.get("selected_RCMV"))),
+        "failure_joinable_rate": metrics.get("failure_joinable_rate", _failure_joinable_rate(run_path)),
+        "failure_join_key": metrics.get("failure_join_key", _failure_join_key(metrics)),
+    }
 
 
 def _reservation_failure_rows(run_path: Path, metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -290,15 +680,37 @@ def _reservation_failure_rows(run_path: Path, metrics: Mapping[str, Any]) -> lis
         rows.append(
             {
                 **_metric_context(metrics),
+                "run_status": metrics.get("status", ""),
                 "failure_source": "reservation",
+                "decision_context_id": row.get("decision_context_id", ""),
                 "reservation_id": row.get("reservation_id", ""),
                 "status": status,
                 "failure_reason": row.get("failure_reason", ""),
+                "failure_stage": _reservation_failure_stage(status),
                 "linked_action_id": row.get("action_id", ""),
                 "linked_edge_id": row.get("edge_id", ""),
+                "action_id": row.get("action_id", ""),
                 "ramp_id": row.get("ramp_id", ""),
                 "edge_id": row.get("edge_id", ""),
                 "slot_id": row.get("slot_id", ""),
+                "vehicle_id": row.get("ramp_id", ""),
+                "planned_tau": row.get("planned_tau", ""),
+                "actual_time": row.get("planned_tau", ""),
+                "actual_margin_front": row.get("actual_margin_front", ""),
+                "actual_margin_rear": row.get("actual_margin_rear", ""),
+                "denominator_scope": "reservation",
+                "demand_id": row.get("ramp_id", ""),
+                "failure_join_key": _failure_join_key(
+                    {
+                        **metrics,
+                        "decision_context_id": row.get("decision_context_id", ""),
+                        "reservation_id": row.get("reservation_id", ""),
+                        "action_id": row.get("action_id", ""),
+                        "edge_id": row.get("edge_id", ""),
+                        "slot_id": row.get("slot_id", ""),
+                        "demand_id": row.get("ramp_id", ""),
+                    }
+                ),
             }
         )
     return rows
@@ -313,14 +725,32 @@ def _event_failure_rows(run_path: Path, metrics: Mapping[str, Any]) -> list[dict
         rows.append(
             {
                 **_metric_context(metrics),
+                "run_status": metrics.get("status", ""),
                 "failure_source": "realized_event",
+                "decision_context_id": row.get("decision_context_id", ""),
                 "event_id": row.get("event_id", ""),
                 "event_type": event_type,
                 "status": event_type,
                 "failure_reason": row.get("note", ""),
+                "failure_stage": "guidance_execution",
                 "linked_action_id": row.get("linked_action_id", ""),
                 "linked_edge_id": row.get("linked_edge_id", ""),
+                "action_id": row.get("linked_action_id", ""),
                 "reservation_id": row.get("linked_reservation_id", ""),
+                "edge_id": row.get("linked_edge_id", ""),
+                "vehicle_id": row.get("vehicle_ids", ""),
+                "actual_time": row.get("time", ""),
+                "denominator_scope": "realized_event",
+                "failure_join_key": _failure_join_key(
+                    {
+                        **metrics,
+                        "decision_context_id": row.get("decision_context_id", ""),
+                        "reservation_id": row.get("linked_reservation_id", ""),
+                        "action_id": row.get("linked_action_id", ""),
+                        "edge_id": row.get("linked_edge_id", ""),
+                        "event_id": row.get("event_id", ""),
+                    }
+                ),
                 "severity": row.get("severity", ""),
             }
         )
@@ -328,11 +758,21 @@ def _event_failure_rows(run_path: Path, metrics: Mapping[str, Any]) -> list[dict
 
 
 def _metric_context(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = metrics.get("run_id", "")
     return {
-        "run_id": metrics.get("run_id", ""),
+        "batch_id": metrics.get("batch_id", ""),
+        "run_id": run_id,
+        "unique_run_id": metrics.get("unique_run_id", run_id),
         "scenario_id": metrics.get("scenario_id", ""),
         "seed": metrics.get("seed", ""),
         "algorithm_id": metrics.get("algorithm_id", ""),
+        "decision_mode": metrics.get("decision_mode", ""),
+        "state_hash": metrics.get("state_hash", ""),
+        "config_hash": metrics.get("config_hash", ""),
+        "code_version": metrics.get("code_version", ""),
+        "metrics_schema_version": metrics.get("metrics_schema_version", METRICS_SCHEMA_VERSION),
+        "readiness_schema_version": metrics.get("readiness_schema_version", READINESS_SCHEMA_VERSION),
+        "evidence_package_version": metrics.get("evidence_package_version", EVIDENCE_PACKAGE_VERSION),
     }
 
 
@@ -381,6 +821,293 @@ def _truthy(value: Any) -> bool:
     return str(value).lower() in {"true", "1", "yes"}
 
 
+def _filter_run_dirs_by_status(
+    run_dirs: Sequence[str | Path],
+    status: str,
+) -> list[Path]:
+    return [Path(run_dir) for run_dir in run_dirs if _read_metrics(Path(run_dir)).get("status") == status]
+
+
+def _near_miss_type_from_action(action_row: Mapping[str, Any]) -> str:
+    nominal_edge_id = str(action_row.get("nominal_edge_id", ""))
+    if not nominal_edge_id:
+        return ""
+    action_type = str(action_row.get("action_type", ""))
+    return "boundary_speed_near_miss" if action_type in {"front_acc", "rear_dec", "front_rear"} else ""
+
+
+def _reservation_failure_stage(status: str) -> str:
+    if status == "expired":
+        return "slot_expiration"
+    if status == "failed_invalid_slot":
+        return "predicted_valid_realized_invalid"
+    if status == "failed_unsafe_margin":
+        return "merge_at_tau"
+    if status == "failed_unreachable":
+        return "guidance_execution"
+    return "reservation_creation"
+
+
+def _failure_join_key(values: Mapping[str, Any]) -> str:
+    parts = [
+        values.get("batch_id", ""),
+        values.get("run_id", ""),
+        values.get("decision_context_id", ""),
+        values.get("reservation_id", ""),
+        values.get("action_id", ""),
+        values.get("edge_id", values.get("linked_edge_id", "")),
+        values.get("slot_id", ""),
+        values.get("demand_id", values.get("ramp_id", "")),
+        values.get("event_id", ""),
+    ]
+    return "|".join(str(part) for part in parts if part not in (None, ""))
+
+
+def _failure_joinable_rate(run_path: Path) -> float:
+    rows = [
+        *_read_csv(run_path / "reservations.csv"),
+        *_read_csv(run_path / "realized_events.csv"),
+    ]
+    failures = []
+    for row in rows:
+        status = str(row.get("status", ""))
+        event_type = str(row.get("event_type", ""))
+        if status.startswith("failed_") or status == "expired" or event_type:
+            failures.append(row)
+    if not failures:
+        return 1.0
+    joinable = 0
+    for row in failures:
+        if row.get("reservation_id") or row.get("linked_reservation_id") or row.get("action_id") or row.get("linked_action_id"):
+            joinable += 1
+    return float(joinable) / float(len(failures))
+
+
+def _rate_float(numerator: Any, denominator: Any) -> float:
+    denom = _float(denominator)
+    return 0.0 if denom <= 0 else _float(numerator) / denom
+
+
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+
+
+def _write_manifest(path: Path, run_dirs: Sequence[str | Path]) -> Path:
+    rows = []
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        rows.append(
+            {
+                "batch_id": metrics.get("batch_id", ""),
+                "run_id": metrics.get("run_id", run_path.name),
+                "run_dir": str(run_path),
+                "scenario_id": metrics.get("scenario_id", ""),
+                "seed": metrics.get("seed", ""),
+                "algorithm_id": metrics.get("algorithm_id", ""),
+                "state_hash": metrics.get("state_hash", ""),
+                "status": metrics.get("status", ""),
+            }
+        )
+    _write_csv(
+        path,
+        rows,
+        ["batch_id", "run_id", "run_dir", "scenario_id", "seed", "algorithm_id", "state_hash", "status"],
+    )
+    return path
+
+
+def _write_schema_manifest(path: Path) -> Path:
+    payload = {
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "aggregate_metrics_columns": AGGREGATE_METRIC_COLUMNS,
+        "failure_summary_columns": FAILURE_SUMMARY_COLUMNS,
+        "rcmv_trace_columns": RCMV_TRACE_COLUMNS,
+        "readiness_summary_columns": READINESS_SUMMARY_COLUMNS,
+        "state_hash_fairness_columns": STATE_HASH_FAIRNESS_COLUMNS,
+        "run_csv_schemas": CSV_LOG_SCHEMAS,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_positive_manifest(
+    path: Path,
+    run_dirs: Sequence[str | Path],
+    *,
+    batch_id: str,
+) -> Path:
+    rows = []
+    for run_dir in run_dirs:
+        metrics = _read_metrics(Path(run_dir))
+        rows.append(
+            {
+                "run_id": metrics.get("run_id", Path(run_dir).name),
+                "scenario_id": metrics.get("scenario_id", ""),
+                "seed": metrics.get("seed", ""),
+                "algorithm_id": metrics.get("algorithm_id", ""),
+                "selected_RCMV": metrics.get("selected_RCMV", ""),
+                "selected_action_type": metrics.get("selected_action_type", ""),
+                "merge_success_rate_over_demand": metrics.get("merge_success_rate_over_demand", ""),
+            }
+        )
+    payload = {
+        "batch_id": batch_id,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
+        "positive_rcmv_case_count": len(rows),
+        "positive_rcmv_cases": rows,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_gate_manifest(path: Path, *, batch_id: str) -> Path:
+    payload = {
+        "batch_id": batch_id,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
+        "purpose": "Gate D0 input assembled by Wave 6A.0 evidence hygiene patch",
+        "denominator_policy": _denominator_policy(),
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_paper_claim_support_table(
+    path: Path,
+    *,
+    positive_dirs: Sequence[str | Path],
+    fairness: Mapping[str, Any],
+) -> Path:
+    rows = [
+        {
+            "claim": "boundary_speed_v0_micro_episode_traceable",
+            "support_status": "candidate_evidence",
+            "evidence_file": "aggregate_metrics_completed.csv",
+            "notes": "Wave 6A.0 validates evidence hygiene only; Gate D0 has not yet decided paper claim strength.",
+        },
+        {
+            "claim": "positive_rcmv_case_exists",
+            "support_status": "supported" if positive_dirs else "not_supported",
+            "evidence_file": "positive_rcmv_rcmv_trace.csv",
+            "notes": f"positive selected_RCMV run count: {len(positive_dirs)}",
+        },
+        {
+            "claim": "state_hash_fairness",
+            "support_status": "supported" if fairness.get("fairness_pass") else "not_supported",
+            "evidence_file": "state_hash_fairness.csv",
+            "notes": "unique_state_hash_count must be 1 for each scenario/seed comparison group.",
+        },
+        {
+            "claim": "lane_change_rolling_stochastic",
+            "support_status": "not_evaluated",
+            "evidence_file": "",
+            "notes": "Forbidden in Wave 6A.0; keep as limitation/future work until later gates.",
+        },
+    ]
+    _write_csv(path, rows, ["claim", "support_status", "evidence_file", "notes"])
+    return path
+
+
+def _write_evidence_index(
+    path: Path,
+    *,
+    batch_id: str,
+    run_dirs: Sequence[str | Path],
+    positive_dirs: Sequence[str | Path],
+    fairness: Mapping[str, Any],
+) -> Path:
+    scenarios = sorted({str(_read_metrics(Path(run_dir)).get("scenario_id", "")) for run_dir in run_dirs})
+    algorithms = sorted({str(_read_metrics(Path(run_dir)).get("algorithm_id", "")) for run_dir in run_dirs})
+    payload = {
+        "batch_id": batch_id,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "code_version": _first_present(run_dirs, "code_version"),
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "included_scenarios": scenarios,
+        "included_algorithms": algorithms,
+        "positive_rcmv_case_count": len(positive_dirs),
+        "state_hash_fairness_pass": bool(fairness.get("fairness_pass")),
+        "denominator_policy": _denominator_policy(),
+        "files": {
+            "aggregate_metrics_completed": "main_batch/aggregate_metrics_completed.csv",
+            "failure_summary_main_batch": "main_batch/failure_summary_main_batch.csv",
+            "failure_summary_readiness_fail": "readiness_fail/failure_summary_readiness_fail.csv",
+            "positive_rcmv_aggregate_metrics": "positive_rcmv_micro/positive_rcmv_aggregate_metrics.csv",
+            "positive_rcmv_failure_summary": "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+            "positive_rcmv_rcmv_trace": "positive_rcmv_micro/positive_rcmv_rcmv_trace.csv",
+            "rcmv_trace": "main_batch/rcmv_trace.csv",
+            "readiness_summary": "main_batch/readiness_summary.csv",
+            "state_hash_fairness": "main_batch/state_hash_fairness.csv",
+            "reservation_denominator": "main_batch/aggregate_metrics_completed.csv",
+            "demand_denominator": "main_batch/aggregate_metrics_completed.csv",
+        },
+        "answers": {
+            "reservation_denominator_file": "main_batch/aggregate_metrics_completed.csv",
+            "demand_denominator_file": "main_batch/aggregate_metrics_completed.csv",
+            "positive_rcmv_case_formally_included": len(positive_dirs) > 0,
+            "readiness_failure_saved_separately": True,
+            "failure_summary_layered_names": [
+                "main_batch/failure_summary_main_batch.csv",
+                "readiness_fail/failure_summary_readiness_fail.csv",
+                "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+            ],
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _collect_raw_csv(
+    run_dirs: Sequence[str | Path],
+    filename: str,
+    output_path: str | Path,
+) -> Path:
+    rows = []
+    columns: list[str] = []
+    for run_dir in run_dirs:
+        metrics = _read_metrics(Path(run_dir))
+        for row in _read_csv(Path(run_dir) / filename):
+            merged = {**_metric_context(metrics), **row}
+            rows.append(merged)
+            for column in merged:
+                if column not in columns:
+                    columns.append(column)
+    _write_csv(output_path, rows, columns or GLOBAL_EVIDENCE_COLUMNS)
+    return Path(output_path)
+
+
+def _first_present(run_dirs: Sequence[str | Path], key: str) -> str:
+    for run_dir in run_dirs:
+        value = _read_metrics(Path(run_dir)).get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _denominator_policy() -> dict[str, str]:
+    return {
+        "failed_reservation_rate": "failed_reservation_count / generated_reservation_count",
+        "generated_reservation_count": "reservation_count or planned_reservation_count, explicitly marked by failed_reservation_denominator",
+        "merge_success_rate_over_demand": "merge_success_count / D_H",
+        "predicted_unserved_demand_rate": "selected_Z_R / D_H",
+        "realized_unserved_demand_rate": "(D_H - merge_success_count) / D_H",
+    }
+
+
 def _read_csv(path: str | Path) -> list[dict[str, str]]:
     file_path = Path(path)
     if not file_path.exists():
@@ -409,11 +1136,20 @@ def _csv_value(value: Any) -> Any:
 
 __all__ = [
     "AGGREGATE_METRIC_COLUMNS",
+    "EVIDENCE_PACKAGE_VERSION",
     "FAILURE_SUMMARY_COLUMNS",
+    "GLOBAL_EVIDENCE_COLUMNS",
+    "METRICS_SCHEMA_VERSION",
     "RCMV_TRACE_COLUMNS",
+    "READINESS_SCHEMA_VERSION",
+    "READINESS_SUMMARY_COLUMNS",
     "SUMMARY_COLUMNS",
+    "STATE_HASH_FAIRNESS_COLUMNS",
     "aggregate_failures",
     "aggregate_metrics",
+    "aggregate_readiness",
+    "build_evidence_package",
     "collect_rcmv_trace",
     "generate_summary_tables",
+    "write_state_hash_fairness_csv",
 ]

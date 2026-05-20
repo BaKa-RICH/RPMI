@@ -154,10 +154,16 @@ from rpmi.reservations import (
     update_reservations_at_tau,
 )
 from rpmi.analysis import (
+    EVIDENCE_PACKAGE_VERSION,
+    METRICS_SCHEMA_VERSION,
+    READINESS_SCHEMA_VERSION,
     aggregate_failures,
     aggregate_metrics,
+    aggregate_readiness,
+    build_evidence_package,
     collect_rcmv_trace,
     generate_summary_tables,
+    write_state_hash_fairness_csv,
 )
 from rpmi.runner import (
     AblationConfig,
@@ -198,6 +204,7 @@ __all__ = [
     "Edge",
     "EdgeQuality",
     "EpisodeResult",
+    "EVIDENCE_PACKAGE_VERSION",
     "ExperimentRunSpec",
     "FeatureFlags",
     "FormalS0BatchResult",
@@ -205,9 +212,11 @@ __all__ = [
     "MatchingConfig",
     "MatchingEdge",
     "MatchingResult",
+    "METRICS_SCHEMA_VERSION",
     "NearMissEdge",
     "NearMissLabel",
     "ReadinessReport",
+    "READINESS_SCHEMA_VERSION",
     "Reservation",
     "RunArtifacts",
     "RunConfig",
@@ -228,6 +237,7 @@ __all__ = [
     "action_to_row",
     "aggregate_failures",
     "aggregate_metrics",
+    "aggregate_readiness",
     "analyze_predictor_outcome",
     "analyze_s0_targets",
     "append_action_evaluation_rows",
@@ -244,6 +254,7 @@ __all__ = [
     "boundary_type_for_edge",
     "build_boundary_speed_profile",
     "build_decision_context",
+    "build_evidence_package",
     "build_edges",
     "build_matching_cost_matrix",
     "build_matching_edges",
@@ -348,6 +359,7 @@ __all__ = [
     "validate_single_action",
     "verify_state_hash_fairness",
     "write_scenario_manifest",
+    "write_state_hash_fairness_csv",
 ]
 
 __version__ = "0.1.0"

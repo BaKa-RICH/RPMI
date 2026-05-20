@@ -3,6 +3,7 @@ import json
 from dataclasses import asdict
 
 from rpmi.analysis import aggregate_failures, aggregate_metrics, collect_rcmv_trace
+from rpmi.analysis import EVIDENCE_PACKAGE_VERSION, METRICS_SCHEMA_VERSION
 from rpmi.runner import (
     ExperimentRunSpec,
     build_decision_context,
@@ -144,3 +145,233 @@ def test_no_near_miss_ablation_is_runnable_and_expands_candidates(tmp_path):
     assert ablation["uses_near_miss"] is False
     assert ablation["ablation_no_near_miss_screening"] is True
     assert ablation["candidate_action_count"] > proposed["candidate_action_count"]
+
+
+def test_wave6a0_unique_run_ids_and_evidence_package_layout(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=3)],
+        [3],
+        ["fifo_no_production", "raw_gap_reservation", "rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_layout",
+    )
+
+    package = tmp_path / "wave6a0_layout" / "evidence_package"
+    manifest_rows = read_csv(package / "main_batch" / "batch_manifest.csv")
+    run_ids = [row["run_id"] for row in manifest_rows]
+
+    assert result.evidence_package_path == str(package)
+    assert len(run_ids) == len(set(run_ids))
+    assert all("__" in row["run_id"] for row in manifest_rows)
+    for path in [
+        package / "main_batch" / "aggregate_metrics_completed.csv",
+        package / "main_batch" / "failure_summary_main_batch.csv",
+        package / "readiness_fail" / "failure_summary_readiness_fail.csv",
+        package / "positive_rcmv_micro" / "positive_rcmv_manifest.json",
+        package / "gate_D0_input" / "paper_claim_support_table.csv",
+        package / "evidence_index.json",
+        package / "schema_manifest.json",
+    ]:
+        assert path.exists()
+    assert not (package / "failure_summary.csv").exists()
+
+
+def test_wave6a0_aggregate_metrics_have_dual_denominators(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=3)],
+        [3],
+        ["rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_denominator",
+    )
+
+    rows = read_csv(result.aggregate_metrics_path)
+    row = rows[0]
+
+    assert row["metrics_schema_version"] == METRICS_SCHEMA_VERSION
+    assert row["evidence_package_version"] == EVIDENCE_PACKAGE_VERSION
+    assert row["failed_reservation_denominator"] == "generated_reservation_count"
+    assert "failed_reservation_rate" in row
+    assert "merge_success_rate_over_demand" in row
+    assert "predicted_unserved_demand_rate" in row
+    assert "realized_unserved_demand_rate" in row
+    if float(row["D_H"]) > 0:
+        assert float(row["merge_success_rate_over_demand"]) == float(row["merge_success_count"]) / float(row["D_H"])
+
+
+def test_wave6a0_readiness_failed_is_split_from_completed_comparison(tmp_path):
+    failed = make_scenario_config("S2", readiness_targets={"near_miss_count_min": 99})
+    completed = make_scenario_config("S5", seed=3)
+
+    result = run_baseline_suite(
+        [failed, completed],
+        [3],
+        ["rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_readiness_split",
+    )
+
+    package = tmp_path / "wave6a0_readiness_split" / "evidence_package"
+    completed_rows = read_csv(package / "main_batch" / "aggregate_metrics_completed.csv")
+    readiness_rows = read_csv(package / "readiness_fail" / "aggregate_metrics_readiness_fail.csv")
+    readiness_failures = read_csv(package / "readiness_fail" / "failure_summary_readiness_fail.csv")
+
+    assert completed_rows
+    assert readiness_rows
+    assert all(row["status"] == "completed" for row in completed_rows)
+    assert all(row["status"] == "readiness_failed" for row in readiness_rows)
+    assert all(row["failure_stage"] == "readiness" for row in readiness_failures)
+
+
+def test_wave6a0_rcmv_trace_contains_action_profile_fields(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=3)],
+        [3],
+        ["rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_rcmv_trace",
+    )
+
+    rows = read_csv(result.rcmv_trace_path)
+
+    assert len(rows) >= 3
+    assert {
+        "action_type",
+        "nominal_edge_id",
+        "boundary_type",
+        "requested_delta_W",
+        "delta_W_target",
+        "T_prod",
+        "u_front",
+        "u_rear",
+        "action_profile_feasible",
+        "matched_rd_sum",
+    }.issubset(rows[0])
+    assert any(row["selected"].lower() == "true" for row in rows)
+
+
+def test_wave6a0_failure_summary_rows_have_join_keys(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=3)],
+        [3],
+        ["fifo_no_production", "raw_gap_reservation", "rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_failure_join",
+    )
+
+    rows = read_csv(result.failure_summary_path)
+
+    assert rows
+    assert all("failure_join_key" in row for row in rows)
+    assert any(row["action_id"] or row["linked_action_id"] for row in rows)
+    assert any(row["edge_id"] or row["linked_edge_id"] for row in rows)
+
+
+def test_wave6a0_stale_rd_and_raw_gap_metrics_are_visible(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=3)],
+        [3],
+        [
+            "raw_gap_reservation",
+            "rpmi_cmv",
+            "rpmi_cmv_without_rd",
+            "rpmi_cmv_without_action_conditioned_reservation",
+        ],
+        tmp_path,
+        batch_id="wave6a0_ablation_metrics",
+    )
+
+    rows = {row["algorithm_id"]: row for row in read_csv(result.aggregate_metrics_path)}
+
+    assert "stale_reservation_harm" in rows["rpmi_cmv_without_action_conditioned_reservation"]
+    assert rows["rpmi_cmv_without_action_conditioned_reservation"]["stale_reservation_harm_reason"]
+    assert rows["rpmi_cmv_without_rd"]["rd_decision_changed_flag"] in {"True", "False"}
+    assert rows["raw_gap_reservation"]["raw_gap_illusion_flag"] in {"True", "False"}
+    assert "action_conditioned_gain" in rows["rpmi_cmv"]
+
+
+def test_wave6a0_denominator_warning_when_reservation_success_hides_unserved_demand(tmp_path):
+    run_dir = run_experiment(
+        ExperimentRunSpec(
+            None,
+            "density_triggered",
+            3,
+            tmp_path / "runs",
+            scenario_id="S5",
+        )
+    )
+
+    aggregate_path = aggregate_metrics([run_dir], tmp_path / "aggregate_metrics.csv")
+    row = read_csv(aggregate_path)[0]
+
+    assert row["failed_reservation_denominator"] == "generated_reservation_count"
+    if float(row["failed_reservation_rate"]) == 0.0 and float(row["realized_unserved_demand_count"]) > 0.0:
+        assert row["denominator_warning_flag"] == "True"
+
+
+def test_wave6a0_state_hash_fairness_csv_groups_by_scenario_seed(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S5", seed=5)],
+        [5],
+        ["fifo_no_production", "density_triggered", "speed_benefit"],
+        tmp_path,
+        batch_id="wave6a0_fairness_csv",
+    )
+
+    package = tmp_path / "wave6a0_fairness_csv" / "evidence_package"
+    rows = read_csv(package / "main_batch" / "state_hash_fairness.csv")
+
+    assert rows
+    assert rows[0]["algorithm_count"] == "3"
+    assert rows[0]["unique_state_hash_count"] == "1"
+    assert rows[0]["fairness_pass"] == "True"
+
+
+def test_wave6a0_evidence_index_answers_audit_questions(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S2", seed=3)],
+        [3],
+        ["rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_index",
+    )
+
+    index = json.loads(open(result.evidence_index_path, encoding="utf-8").read())
+
+    assert index["denominator_policy"]["failed_reservation_rate"] == "failed_reservation_count / generated_reservation_count"
+    assert index["files"]["reservation_denominator"] == "main_batch/aggregate_metrics_completed.csv"
+    assert index["files"]["demand_denominator"] == "main_batch/aggregate_metrics_completed.csv"
+    assert index["answers"]["positive_rcmv_case_formally_included"] is True
+    assert index["answers"]["readiness_failure_saved_separately"] is True
+
+
+def test_wave6a0_positive_rcmv_package_is_formally_included(tmp_path):
+    result = run_baseline_suite(
+        [make_scenario_config("S2", seed=3)],
+        [3],
+        ["rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6a0_positive",
+    )
+
+    package = tmp_path / "wave6a0_positive" / "evidence_package"
+    manifest = json.loads(open(package / "positive_rcmv_micro" / "positive_rcmv_manifest.json", encoding="utf-8").read())
+    aggregate_rows = read_csv(package / "positive_rcmv_micro" / "positive_rcmv_aggregate_metrics.csv")
+    trace_rows = read_csv(package / "positive_rcmv_micro" / "positive_rcmv_rcmv_trace.csv")
+
+    assert manifest["positive_rcmv_case_count"] >= 1
+    assert aggregate_rows
+    assert any(float(row["selected_RCMV"]) > 0.0 for row in aggregate_rows)
+    assert trace_rows
+
+
+def test_wave6a0_run_artifacts_include_state_hash_json(tmp_path):
+    run_dir = run_experiment(
+        ExperimentRunSpec(None, "rpmi_cmv", 3, tmp_path / "runs", scenario_id="S5")
+    )
+
+    state_hash = json.loads((run_dir / "state_hash.json").read_text(encoding="utf-8"))
+    metrics = json.loads((run_dir / "metrics_episode.json").read_text(encoding="utf-8"))["metrics"]
+
+    assert state_hash["state_hash"] == metrics["state_hash"]
+    assert metrics["metrics_schema_version"] == METRICS_SCHEMA_VERSION

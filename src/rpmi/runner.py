@@ -36,10 +36,15 @@ from rpmi.actions import (
     slot_inventory_params,
 )
 from rpmi.analysis import (
+    EVIDENCE_PACKAGE_VERSION,
+    METRICS_SCHEMA_VERSION,
+    READINESS_SCHEMA_VERSION,
     aggregate_failures,
     aggregate_metrics,
+    build_evidence_package,
     collect_rcmv_trace,
     generate_summary_tables,
+    write_state_hash_fairness_csv,
 )
 from rpmi.config import (
     AlgorithmConfig,
@@ -151,6 +156,7 @@ class ExperimentRunSpec:
     mode: RunMode = "comparison"
     scenario_id: str | None = None
     run_id: str | None = None
+    batch_id: str | None = None
     ablations: AblationConfig = AblationConfig()
 
 
@@ -177,6 +183,9 @@ class BatchResult:
     ablation_comparison_summary_path: str
     batch_manifest_path: str
     fairness_report_path: str
+    evidence_package_path: str = ""
+    evidence_index_path: str = ""
+    gate_D0_input_path: str = ""
 
 
 BASELINE_CONFIGS: dict[str, BaselineConfig] = {
@@ -301,7 +310,12 @@ def run_experiment(run_spec: ExperimentRunSpec) -> Path:
     state = generate_state(scenario_config)
     state_digest = hash_state(state)
     decision_context_id = make_decision_context_id(artifacts.run_id, 0)
-    log_context = _log_context(artifacts, decision_context_id, state_digest)
+    log_context = _log_context(
+        artifacts,
+        decision_context_id,
+        state_digest,
+        batch_id=run_spec.batch_id or "",
+    )
 
     readiness_metrics = compute_readiness_metrics(state, scenario_config)
     readiness = readiness_check(readiness_metrics, scenario_config)
@@ -331,6 +345,7 @@ def run_experiment(run_spec: ExperimentRunSpec) -> Path:
             scenario_config,
             state_digest,
             readiness,
+            batch_id=run_spec.batch_id or "",
         )
         _write_episode_metrics(artifacts.run_dir, metrics)
         return artifacts.run_dir
@@ -345,6 +360,8 @@ def run_experiment(run_spec: ExperimentRunSpec) -> Path:
         state_hash=state_digest,
         config_hash=artifacts.config_hash,
         code_version=artifacts.code_version,
+        run_id=artifacts.run_id,
+        batch_id=run_spec.batch_id or "",
     )
     _write_episode_metrics(artifacts.run_dir, result.metrics)
     return artifacts.run_dir
@@ -361,6 +378,8 @@ def run_single_t0_episode(
     state_hash: str | None = None,
     config_hash: str | None = None,
     code_version: str = "local_dirty",
+    run_id: str | None = None,
+    batch_id: str = "",
 ) -> EpisodeResult:
     """Execute one t0 policy decision and write Wave 6A logs."""
 
@@ -369,15 +388,21 @@ def run_single_t0_episode(
     scenario = scenario_config or make_scenario_config(config.scenario_id, seed=config.seed)
     baseline = baseline_config or resolve_baseline_config(config.algorithm_id)
     run_path = Path(run_dir)
+    resolved_run_id = run_id or run_path.name
     state_digest = state_hash or hash_state(state)
     log_context = {
-        "run_id": run_path.name,
+        "batch_id": batch_id,
+        "run_id": resolved_run_id,
+        "unique_run_id": resolved_run_id,
         "step": state.step,
         "time": state.time,
         "decision_context_id": decision_context_id,
         "state_hash": state_digest,
         "config_hash": config_hash or hash_config(config_to_canonical_dict(config)),
         "code_version": code_version,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
         "units_version": UNITS_VERSION,
     }
 
@@ -429,6 +454,11 @@ def run_single_t0_episode(
         reservations,
         execution["reservations"],
         execution["event_rows"],
+        run_id=resolved_run_id,
+        decision_context_id=decision_context_id,
+        config_hash=str(log_context["config_hash"]),
+        code_version=code_version,
+        batch_id=batch_id,
     )
     return EpisodeResult(
         metrics=metrics,
@@ -665,6 +695,13 @@ def run_baseline_suite(
                     algorithm_id=baseline.baseline_id,
                     seed=seed,
                     output_root=runs_root,
+                    run_id=_batch_run_id(
+                        resolved_batch_id,
+                        _scenario_id_for_run_id(scenario_path),
+                        seed,
+                        baseline.baseline_id,
+                    ),
+                    batch_id=resolved_batch_id,
                     ablations=baseline.ablations,
                 )
                 run_dirs.append(run_experiment(spec))
@@ -680,9 +717,22 @@ def run_baseline_suite(
 
     manifest_path = batch_dir / "batch_manifest.csv"
     _write_batch_manifest(manifest_path, run_dirs)
-    aggregate_path = aggregate_metrics(run_dirs, batch_dir / "aggregate_metrics.csv")
-    failure_path = aggregate_failures(run_dirs, batch_dir / "failure_summary.csv")
-    rcmv_path = collect_rcmv_trace(run_dirs, batch_dir / "rcmv_trace.csv")
+    write_state_hash_fairness_csv(
+        fairness,
+        batch_dir / "state_hash_fairness.csv",
+        batch_id=resolved_batch_id,
+    )
+    evidence_dir = batch_dir / "evidence_package"
+    evidence_paths = build_evidence_package(
+        run_dirs,
+        package_dir=evidence_dir,
+        batch_id=resolved_batch_id,
+        fairness=fairness,
+        batch_manifest_path=manifest_path,
+    )
+    aggregate_path = evidence_paths["aggregate_metrics_completed"]
+    failure_path = evidence_paths["failure_summary_main_batch"]
+    rcmv_path = evidence_paths["rcmv_trace"]
     tables = generate_summary_tables(
         run_dirs,
         batch_dir=batch_dir,
@@ -701,6 +751,9 @@ def run_baseline_suite(
         ablation_comparison_summary_path=str(tables["ablation_comparison_summary"]),
         batch_manifest_path=str(manifest_path),
         fairness_report_path=str(fairness_path),
+        evidence_package_path=str(evidence_dir),
+        evidence_index_path=str(evidence_paths["evidence_index"]),
+        gate_D0_input_path=str(evidence_dir / "gate_D0_input"),
     )
 
 
@@ -713,6 +766,12 @@ def compute_episode_metrics(
     planned_reservations: Sequence[Reservation],
     final_reservations: Sequence[Reservation],
     events: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str = "",
+    decision_context_id: str = "",
+    config_hash: str = "",
+    code_version: str = "local_dirty",
+    batch_id: str = "",
 ) -> dict[str, Any]:
     """Return the Phase 6A episode metrics JSON payload."""
 
@@ -728,23 +787,60 @@ def compute_episode_metrics(
     merged = [item for item in final_reservations if item.status == "merged"]
     stale = [item for item in final_reservations if item.stale_flag]
     reservation_count = len(final_reservations)
+    planned_reservation_count = len(planned_reservations)
+    generated_reservation_count = reservation_count if reservation_count > 0 else planned_reservation_count
+    D_H = selected_eval.D_H
     hard_brakes = [item for item in events if item.get("event_type") == "hard_brake"]
     invalid_events = [
         item
         for item in events
         if item.get("event_type") in {"overlap", "negative_margin"}
     ]
+    merge_success_count = len(merged)
+    failed_count = len(failed_reservations)
+    realized_unserved = max(D_H - merge_success_count, 0.0)
+    predicted_unserved = selected_eval.Z_R
+    no_reservation_due_to_invalid_supply = max(D_H - generated_reservation_count, 0.0) if generated_reservation_count <= 0 else 0.0
+    denominator_warning = (
+        failed_count == 0
+        and D_H > 0.0
+        and (merge_success_count == 0 or realized_unserved > 0.0)
+    )
+    positive_count = sum(1 for item in decision["evaluations"] if item.RCMV > 0.0)
+    max_rcmv = max((item.RCMV for item in decision["evaluations"]), default=0.0)
+    theta = float(config.algorithm.theta)
+    selected_ids = set(selected_eval.matched_edge_ids)
+    baseline_ids = set(baseline_eval.matched_edge_ids)
+    stale_harm = (
+        max(selected_eval.J - baseline_eval.J, 0.0)
+        if baseline.ablations.without_action_conditioned_reservation
+        else 0.0
+    )
+    stale_harm_reason = (
+        "without_action_conditioned_reservation uses baseline inventory"
+        if baseline.ablations.without_action_conditioned_reservation
+        else "not_stale_ablation"
+    )
     return {
-        "schema_version": "phase6a_metrics_v1",
+        "schema_version": METRICS_SCHEMA_VERSION,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
         "status": "completed",
         "decision_mode": config.sim.decision_mode,
         "scenario_id": scenario.scenario_id,
         "seed": config.seed,
         "algorithm_id": baseline.baseline_id,
-        "run_id": "",
+        "batch_id": batch_id,
+        "run_id": run_id,
+        "unique_run_id": run_id,
+        "decision_context_id": decision_context_id,
+        "config_hash": config_hash,
+        "code_version": code_version,
         "state_hash": state_hash_value,
         "readiness_pass": True,
         "readiness_reason": "PASS",
+        "readiness_fail_reason": "",
         "uses_inventory": baseline.uses_inventory,
         "uses_rd": baseline.uses_rd,
         "uses_near_miss": baseline.uses_near_miss,
@@ -756,16 +852,39 @@ def compute_episode_metrics(
         "ablation_without_rcmv": baseline.ablations.without_rcmv,
         "ablation_without_action_conditioned_reservation": baseline.ablations.without_action_conditioned_reservation,
         "ablation_no_near_miss_screening": baseline.ablations.no_near_miss_screening,
+        "D_H": D_H,
         "mean_ramp_delay": _mean_delay(final_reservations, selected_eval),
-        "merge_success_count": len(merged),
-        "failed_reservation_count": len(failed_reservations),
-        "failed_reservation_rate": _rate(len(failed_reservations), reservation_count),
+        "merge_success_count": merge_success_count,
+        "failed_reservation_count": failed_count,
+        "generated_reservation_count": generated_reservation_count,
+        "failed_reservation_rate": _rate(failed_count, generated_reservation_count),
+        "failed_reservation_denominator": "generated_reservation_count",
+        "merge_success_rate_over_demand": _rate(merge_success_count, D_H),
+        "predicted_unserved_demand_count": predicted_unserved,
+        "predicted_unserved_demand_rate": _rate(predicted_unserved, D_H),
+        "realized_unserved_demand_count": realized_unserved,
+        "realized_unserved_demand_rate": _rate(realized_unserved, D_H),
+        "unserved_demand_count": realized_unserved,
+        "no_reservation_due_to_invalid_supply_count": no_reservation_due_to_invalid_supply,
+        "no_reservation_due_to_invalid_supply_rate": _rate(no_reservation_due_to_invalid_supply, D_H),
+        "waiting_or_unserved_penalty": predicted_unserved,
+        "denominator_warning_flag": denominator_warning,
+        "denominator_notes": "failed_reservation_rate uses generated reservations; merge_success_rate_over_demand uses D_H.",
         "slot_expiration_count": len(expired),
-        "slot_expiration_rate": _rate(len(expired), reservation_count),
+        "slot_expiration_rate": _rate(len(expired), generated_reservation_count),
         "mean_RD_matched": selected_eval.D_bar,
         "hard_brake_count": len(hard_brakes),
         "max_wave_amplitude": _event_max_severity(events),
         "no_fallback_invalid_event_count": len(invalid_events),
+        "failure_joinable_rate": _joinable_failure_rate(final_reservations, events),
+        "failure_join_key": _failure_join_key_for_metrics(
+            run_id=run_id,
+            decision_context_id=decision_context_id,
+            reservation_id=final_reservations[0].reservation_id if final_reservations else "",
+            action_id=selected_action.action_id,
+            edge_id=final_reservations[0].edge_id if final_reservations else "",
+            slot_id=final_reservations[0].slot_id if final_reservations else "",
+        ),
         "throughput_outflow": len(merged),
         "mean_Z_R": selected_eval.Z_R,
         "production_cost_sum": selected_eval.C_bar,
@@ -774,14 +893,25 @@ def compute_episode_metrics(
         "baseline_J": baseline_eval.J,
         "selected_J": selected_eval.J,
         "selected_RCMV": selected_eval.RCMV,
+        "rcmv_positive_margin": max_rcmv - theta,
+        "positive_RCMV_candidate_count": positive_count,
         "baseline_S_R": baseline_eval.S_R,
         "baseline_Z_R": baseline_eval.Z_R,
         "selected_S_R": selected_eval.S_R,
         "selected_Z_R": selected_eval.Z_R,
+        "delta_S_R": selected_eval.S_R - baseline_eval.S_R,
+        "delta_Z_R": baseline_eval.Z_R - selected_eval.Z_R,
         "candidate_action_count": len(decision["evaluations"]),
         "reservation_count": reservation_count,
-        "planned_reservation_count": len(planned_reservations),
+        "planned_reservation_count": planned_reservation_count,
         "stale_reservation_count": len(stale),
+        "stale_reservation_harm": stale_harm,
+        "stale_reservation_harm_reason": stale_harm_reason,
+        "action_conditioned_gain": baseline_eval.J - selected_eval.J,
+        "action_conditioned_gain_reason": "baseline_J - selected_J for same initial state",
+        "rd_decision_changed_flag": baseline.ablations.without_rd and selected_ids != baseline_ids,
+        "raw_gap_illusion_flag": bool(selected_eval.invalid_count > 0 and baseline.production_mode == "raw_gap"),
+        "selected_matched_edge_ids": list(selected_eval.matched_edge_ids),
     }
 
 
@@ -1314,7 +1444,7 @@ def _write_episode_metrics(run_dir: Path, metrics: Mapping[str, Any]) -> None:
     payload["run_id"] = payload.get("run_id") or run_dir.name
     (run_dir / "metrics_episode.json").write_text(
         json.dumps(
-            {"schema_version": "phase6a_metrics_v1", "metrics": payload},
+            {"schema_version": METRICS_SCHEMA_VERSION, "metrics": payload},
             indent=2,
             sort_keys=True,
         )
@@ -1329,34 +1459,83 @@ def _readiness_failed_metrics(
     scenario: ScenarioConfig,
     state_digest: str,
     readiness: ReadinessReport,
+    *,
+    batch_id: str = "",
 ) -> dict[str, Any]:
     return {
-        "schema_version": "phase6a_metrics_v1",
+        "schema_version": METRICS_SCHEMA_VERSION,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
         "status": "readiness_failed",
         "decision_mode": config.sim.decision_mode,
         "scenario_id": scenario.scenario_id,
         "seed": config.seed,
         "algorithm_id": config.algorithm_id,
+        "batch_id": batch_id,
         "run_id": artifacts.run_id,
+        "unique_run_id": artifacts.run_id,
+        "config_hash": artifacts.config_hash,
+        "code_version": artifacts.code_version,
         "state_hash": state_digest,
         "readiness_pass": False,
         "readiness_reason": readiness.fail_reason,
+        "readiness_fail_reason": readiness.fail_reason,
+        "D_H": readiness.metrics.get("D_H", 0.0),
         "mean_ramp_delay": 0.0,
         "merge_success_count": 0,
         "failed_reservation_count": 0,
+        "generated_reservation_count": 0,
         "failed_reservation_rate": 0.0,
+        "failed_reservation_denominator": "generated_reservation_count",
+        "merge_success_rate_over_demand": 0.0,
+        "predicted_unserved_demand_count": readiness.metrics.get("Z_R_0", 0.0),
+        "predicted_unserved_demand_rate": _rate(readiness.metrics.get("Z_R_0", 0.0), readiness.metrics.get("D_H", 0.0)),
+        "realized_unserved_demand_count": readiness.metrics.get("D_H", 0.0),
+        "realized_unserved_demand_rate": _rate(readiness.metrics.get("D_H", 0.0), readiness.metrics.get("D_H", 0.0)),
+        "unserved_demand_count": readiness.metrics.get("D_H", 0.0),
+        "no_reservation_due_to_invalid_supply_count": readiness.metrics.get("D_H", 0.0),
+        "no_reservation_due_to_invalid_supply_rate": _rate(readiness.metrics.get("D_H", 0.0), readiness.metrics.get("D_H", 0.0)),
+        "waiting_or_unserved_penalty": readiness.metrics.get("Z_R_0", 0.0),
+        "denominator_warning_flag": bool(readiness.metrics.get("D_H", 0.0)),
+        "denominator_notes": "readiness_failed run is excluded from completed comparison; demand denominator retained for audit.",
         "slot_expiration_count": 0,
         "slot_expiration_rate": 0.0,
         "mean_RD_matched": 0.0,
         "hard_brake_count": 0,
         "max_wave_amplitude": 0.0,
         "no_fallback_invalid_event_count": 0,
+        "failure_joinable_rate": 1.0,
+        "failure_join_key": _failure_join_key_for_metrics(
+            run_id=artifacts.run_id,
+            decision_context_id=make_decision_context_id(artifacts.run_id, 0),
+        ),
         "throughput_outflow": 0,
         "mean_Z_R": 0.0,
         "production_cost_sum": 0.0,
+        "baseline_J": 0.0,
+        "selected_J": 0.0,
+        "selected_RCMV": 0.0,
+        "rcmv_positive_margin": 0.0,
+        "positive_RCMV_candidate_count": 0,
+        "candidate_action_count": 0,
+        "baseline_S_R": readiness.metrics.get("S_R_0", 0.0),
+        "baseline_Z_R": readiness.metrics.get("Z_R_0", 0.0),
+        "selected_S_R": 0.0,
+        "selected_Z_R": readiness.metrics.get("Z_R_0", 0.0),
+        "delta_S_R": 0.0,
+        "delta_Z_R": 0.0,
         "selected_action_id": "",
         "selected_action_type": "",
+        "reservation_count": 0,
+        "planned_reservation_count": 0,
         "stale_reservation_count": 0,
+        "stale_reservation_harm": 0.0,
+        "stale_reservation_harm_reason": "readiness_failed",
+        "action_conditioned_gain": 0.0,
+        "action_conditioned_gain_reason": "readiness_failed",
+        "rd_decision_changed_flag": False,
+        "raw_gap_illusion_flag": bool(readiness.metrics.get("raw_gap_illusion_count", 0)),
     }
 
 
@@ -1443,21 +1622,32 @@ def _log_context(
     artifacts: RunArtifacts,
     decision_context_id: str,
     state_digest: str,
+    *,
+    batch_id: str = "",
 ) -> dict[str, Any]:
     return {
+        "batch_id": batch_id,
         "run_id": artifacts.run_id,
+        "unique_run_id": artifacts.run_id,
         "step": 0,
         "time": 0.0,
         "decision_context_id": decision_context_id,
         "state_hash": state_digest,
         "config_hash": artifacts.config_hash,
         "code_version": artifacts.code_version,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "readiness_schema_version": READINESS_SCHEMA_VERSION,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
         "units_version": UNITS_VERSION,
     }
 
 
 def _write_run_state_hash(run_dir: Path, state_digest: str) -> None:
     (run_dir / "state_hash.txt").write_text(state_digest + "\n", encoding="utf-8")
+    (run_dir / "state_hash.json").write_text(
+        json.dumps({"state_hash": state_digest}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _experiment_run_id(config: RunConfig) -> str:
@@ -1481,6 +1671,23 @@ def _batch_id(
     return f"batch_{hash_config(payload, n=10)}"
 
 
+def _batch_run_id(
+    batch_id: str,
+    scenario_id: str,
+    seed: int,
+    algorithm_id: str,
+) -> str:
+    return f"{batch_id}__{scenario_id}__seed{int(seed)}__{algorithm_id}"
+
+
+def _scenario_id_for_run_id(path: str | Path) -> str:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Path(path).stem
+    return str(payload.get("scenario_id") or Path(path).stem)
+
+
 def _materialize_scenario(item: str | Path | ScenarioConfig, directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     if isinstance(item, ScenarioConfig):
@@ -1499,19 +1706,43 @@ def _write_batch_manifest(path: Path, run_dirs: Sequence[Path]) -> None:
         metrics = json.loads((run_dir / "metrics_episode.json").read_text(encoding="utf-8"))["metrics"]
         rows.append(
             {
+                "batch_id": metrics.get("batch_id", ""),
                 "run_id": run_dir.name,
+                "unique_run_id": metrics.get("unique_run_id", run_dir.name),
                 "run_dir": str(run_dir),
                 "scenario_id": metrics.get("scenario_id", ""),
                 "seed": metrics.get("seed", ""),
                 "algorithm_id": metrics.get("algorithm_id", ""),
+                "decision_mode": metrics.get("decision_mode", ""),
                 "state_hash": metrics.get("state_hash", ""),
+                "config_hash": metrics.get("config_hash", ""),
+                "code_version": metrics.get("code_version", ""),
+                "metrics_schema_version": metrics.get("metrics_schema_version", METRICS_SCHEMA_VERSION),
+                "readiness_schema_version": metrics.get("readiness_schema_version", READINESS_SCHEMA_VERSION),
+                "evidence_package_version": metrics.get("evidence_package_version", EVIDENCE_PACKAGE_VERSION),
                 "status": metrics.get("status", ""),
             }
         )
     _write_csv(
         path,
         rows,
-        ["run_id", "run_dir", "scenario_id", "seed", "algorithm_id", "state_hash", "status"],
+        [
+            "batch_id",
+            "run_id",
+            "unique_run_id",
+            "run_dir",
+            "scenario_id",
+            "seed",
+            "algorithm_id",
+            "decision_mode",
+            "state_hash",
+            "config_hash",
+            "code_version",
+            "metrics_schema_version",
+            "readiness_schema_version",
+            "evidence_package_version",
+            "status",
+        ],
     )
 
 
@@ -1615,7 +1846,53 @@ def _mean_delay(
 
 
 def _rate(numerator: int, denominator: int) -> float:
-    return 0.0 if denominator <= 0 else float(numerator) / float(denominator)
+    return 0.0 if float(denominator) <= 0 else float(numerator) / float(denominator)
+
+
+def _joinable_failure_rate(
+    reservations: Sequence[Reservation],
+    events: Sequence[Mapping[str, Any]],
+) -> float:
+    failure_count = sum(
+        1
+        for item in reservations
+        if item.status.startswith("failed_") or item.status == "expired"
+    ) + len(events)
+    if failure_count == 0:
+        return 1.0
+    joinable = sum(
+        1
+        for item in reservations
+        if (item.status.startswith("failed_") or item.status == "expired")
+        and bool(item.reservation_id or item.action_id or item.edge_id or item.slot_id)
+    )
+    joinable += sum(
+        1
+        for item in events
+        if bool(
+            item.get("linked_reservation_id")
+            or item.get("linked_action_id")
+            or item.get("linked_edge_id")
+            or item.get("event_id")
+        )
+    )
+    return float(joinable) / float(failure_count)
+
+
+def _failure_join_key_for_metrics(
+    *,
+    run_id: str,
+    decision_context_id: str = "",
+    reservation_id: str = "",
+    action_id: str = "",
+    edge_id: str = "",
+    slot_id: str = "",
+) -> str:
+    return "|".join(
+        part
+        for part in [run_id, decision_context_id, reservation_id, action_id, edge_id, slot_id]
+        if part
+    )
 
 
 def _event_max_severity(events: Sequence[Mapping[str, Any]]) -> float:
