@@ -2,7 +2,12 @@ import csv
 import json
 from dataclasses import asdict
 
-from rpmi.analysis import aggregate_failures, aggregate_metrics, collect_rcmv_trace
+from rpmi.analysis import (
+    aggregate_failures,
+    aggregate_metrics,
+    collect_rcmv_trace,
+    write_gate_d0_decision,
+)
 from rpmi.analysis import EVIDENCE_PACKAGE_VERSION, METRICS_SCHEMA_VERSION
 from rpmi.runner import (
     ExperimentRunSpec,
@@ -488,3 +493,46 @@ def test_wave6aplus_s6_productive_and_positive_rcmv_are_formal_gate_inputs(tmp_p
     assert manifest["case_count"] == 2
     assert any(row["algorithm_id"] == "rpmi_cmv" and row["selected_action_type"] != "none" and float(row["selected_RCMV"]) > 0.0 for row in aggregate_rows)
     assert positive_manifest["positive_rcmv_case_count"] >= 1
+
+
+def test_gate_d0_decision_downgrades_boundary_speed_to_micro_evidence(tmp_path):
+    result = run_baseline_suite(
+        [
+            make_scenario_config("S2", seed=0),
+            make_scenario_config("S5", seed=0),
+            make_scenario_config("S6", seed=0),
+            make_scenario_config("S6_productive", seed=0),
+            make_scenario_config("S7", seed=0),
+            make_scenario_config("S8", seed=0),
+        ],
+        [0],
+        [
+            "raw_gap_reservation",
+            "rpmi_cmv",
+            "rpmi_cmv_without_rd",
+            "rpmi_cmv_without_action_conditioned_reservation",
+            "rpmi_cmv_without_near_miss",
+        ],
+        tmp_path,
+        batch_id="gate_d0_decision",
+    )
+
+    paths = write_gate_d0_decision(result.gate_D0_input_path)
+    decision = json.loads(paths["gate_D0_decision"].read_text(encoding="utf-8"))
+    report = paths["gate_D0_report"].read_text(encoding="utf-8")
+
+    assert paths["gate_D0_report"].exists()
+    assert paths["gate_D0_claim_revision_plan"].exists()
+    assert paths["gate_D0_fixlist"].exists()
+    assert decision["decision"] == "conditional_pass"
+    assert decision["allowed_next_stage"] == "Wave 7"
+    assert decision["completeness"]["pass"] is True
+    assert decision["scenario_support"]["S2"]["support_level"] == "clear_support"
+    assert decision["scenario_support"]["S5"]["support_level"] == "partial_support"
+    assert "production action effectiveness" in " ".join(decision["downgraded_claims"])
+    assert decision["claim_boundaries"]["production_action_effectiveness_supported"] is False
+    assert decision["audit_answers"]["failed_reservation_rate_denominator"] == "generated_reservation_count"
+    assert decision["audit_answers"]["positive_rcmv_case_formally_included"] is True
+    assert decision["audit_answers"]["failure_summary_split_main_readiness_positive"] is True
+    assert decision["audit_answers"]["failed_reservation_zero_but_unserved_or_no_merge_exists"] is True
+    assert "Boundary-speed V0 is not strong enough" in report

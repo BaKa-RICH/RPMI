@@ -326,6 +326,48 @@ SUMMARY_COLUMNS = [
 ]
 
 
+GATE_D0_CORE_SCENARIOS = ["S2", "S5", "S6", "S7", "S8"]
+
+
+GATE_D0_REQUIRED_RELATIVE_PATHS = [
+    "gate_D0_manifest.json",
+    "aggregate_metrics_completed.csv",
+    "aggregate_metrics_readiness_fail.csv",
+    "failure_summary_main_batch.csv",
+    "failure_summary_readiness_fail.csv",
+    "state_hash_fairness.csv",
+    "scenario_manifest.csv",
+    "scenario_mechanism_summary.csv",
+    "baseline_comparison_summary.csv",
+    "ablation_comparison_summary.csv",
+    "rcmv_trace_top_actions.csv",
+    "positive_rcmv_micro/positive_rcmv_manifest.json",
+    "positive_rcmv_micro/positive_rcmv_aggregate_metrics.csv",
+    "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+    "positive_rcmv_micro/positive_rcmv_rcmv_trace.csv",
+    "positive_rcmv_micro/positive_rcmv_action_evaluations.csv",
+    "positive_rcmv_micro/positive_rcmv_reservations.csv",
+    "failure_trace_samples/failure_trace_samples.csv",
+    "trace_replay_summaries/trace_replay_summaries.csv",
+    "paper_claim_support_table.csv",
+]
+
+
+GATE_D0_DENOMINATOR_COLUMNS = [
+    "failed_reservation_count",
+    "generated_reservation_count",
+    "failed_reservation_rate",
+    "failed_reservation_denominator",
+    "D_H",
+    "merge_success_count",
+    "merge_success_rate_over_demand",
+    "predicted_unserved_demand_count",
+    "predicted_unserved_demand_rate",
+    "realized_unserved_demand_count",
+    "realized_unserved_demand_rate",
+]
+
+
 def aggregate_metrics(
     run_dirs: Sequence[str | Path],
     output_path: str | Path | None = None,
@@ -986,6 +1028,597 @@ def build_evidence_package(
     )
     paths["schema_manifest"] = _write_schema_manifest(root / "schema_manifest.json")
     return paths
+
+
+def write_gate_d0_decision(
+    gate_d0_input_dir: str | Path,
+    output_dir: str | Path | None = None,
+) -> dict[str, Path]:
+    """Evaluate Gate D0 from an existing Wave 6A+ input package.
+
+    The gate is read-only with respect to experiment evidence. It writes the
+    required decision artifacts, but does not create new runs or new mechanisms.
+    """
+
+    gate_dir = Path(gate_d0_input_dir)
+    out_dir = Path(output_dir) if output_dir is not None else gate_dir.parent / "gate_D0_decision"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    evaluation = _evaluate_gate_d0(gate_dir)
+
+    decision_payload = {
+        "gate": "D0",
+        "decision": evaluation["decision"],
+        "supported_claims": evaluation["supported_claims"],
+        "downgraded_claims": evaluation["downgraded_claims"],
+        "removed_claims": evaluation["removed_claims"],
+        "required_fixes_before_next_wave": evaluation["required_fixes_before_next_wave"],
+        "allowed_next_stage": evaluation["allowed_next_stage"],
+        "input_dir": str(gate_dir),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "completeness": evaluation["completeness"],
+        "scenario_support": evaluation["scenario_support"],
+        "audit_answers": evaluation["audit_answers"],
+        "claim_boundaries": evaluation["claim_boundaries"],
+        "failure_backtrace": evaluation["failure_backtrace"],
+    }
+
+    decision_path = out_dir / "gate_D0_decision.json"
+    decision_path.write_text(
+        json.dumps(decision_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    report_path = out_dir / "gate_D0_report.md"
+    report_path.write_text(_gate_d0_report_markdown(decision_payload), encoding="utf-8")
+
+    claim_plan_path = out_dir / "gate_D0_claim_revision_plan.md"
+    claim_plan_path.write_text(_gate_d0_claim_plan_markdown(decision_payload), encoding="utf-8")
+
+    fixlist_path = out_dir / "gate_D0_fixlist.md"
+    fixlist_path.write_text(_gate_d0_fixlist_markdown(decision_payload), encoding="utf-8")
+
+    return {
+        "gate_D0_report": report_path,
+        "gate_D0_decision": decision_path,
+        "gate_D0_claim_revision_plan": claim_plan_path,
+        "gate_D0_fixlist": fixlist_path,
+    }
+
+
+def _evaluate_gate_d0(gate_dir: Path) -> dict[str, Any]:
+    missing = [
+        relative
+        for relative in GATE_D0_REQUIRED_RELATIVE_PATHS
+        if not (gate_dir / relative).exists()
+    ]
+    aggregate_rows = _read_csv(gate_dir / "aggregate_metrics_completed.csv")
+    scenario_rows = _read_csv(gate_dir / "scenario_mechanism_summary.csv")
+    fairness_rows = _read_csv(gate_dir / "state_hash_fairness.csv")
+    claim_rows = _read_csv(gate_dir / "paper_claim_support_table.csv")
+    replay_rows = _read_csv(gate_dir / "trace_replay_summaries" / "trace_replay_summaries.csv")
+    failure_rows = _read_csv(gate_dir / "failure_trace_samples" / "failure_trace_samples.csv")
+
+    gate_manifest = _read_json(gate_dir / "gate_D0_manifest.json")
+    positive_manifest = _read_json(gate_dir / "positive_rcmv_micro" / "positive_rcmv_manifest.json")
+    s6_productive_manifest = _read_json(gate_dir / "S6_productive_manifest.json")
+
+    denominator_columns_present = _rows_have_columns(
+        aggregate_rows,
+        GATE_D0_DENOMINATOR_COLUMNS,
+        gate_dir / "aggregate_metrics_completed.csv",
+    )
+    denominator_marked = bool(aggregate_rows) and all(
+        row.get("failed_reservation_denominator") == "generated_reservation_count"
+        for row in aggregate_rows
+    )
+    state_hash_fairness_pass = bool(fairness_rows) and all(
+        _truthy(row.get("fairness_pass"))
+        and int(_float(row.get("unique_state_hash_count"))) == 1
+        for row in fairness_rows
+    )
+    failure_summary_layered = all(
+        (gate_dir / relative).exists()
+        for relative in [
+            "failure_summary_main_batch.csv",
+            "failure_summary_readiness_fail.csv",
+            "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+        ]
+    ) and not (gate_dir / "failure_summary.csv").exists()
+    positive_rcmv_formal = (
+        int(_float(positive_manifest.get("positive_rcmv_case_count"))) > 0
+        and (gate_dir / "positive_rcmv_micro" / "positive_rcmv_rcmv_trace.csv").exists()
+        and (gate_dir / "positive_rcmv_micro" / "positive_rcmv_aggregate_metrics.csv").exists()
+    )
+    failure_trace_joinable = bool(failure_rows) and all(
+        bool(row.get("failure_join_key")) for row in failure_rows
+    )
+
+    completeness_failures = []
+    if missing:
+        completeness_failures.append("missing_required_gate_D0_inputs")
+    if not denominator_columns_present or not denominator_marked:
+        completeness_failures.append("missing_or_unmarked_dual_denominators")
+    if not state_hash_fairness_pass:
+        completeness_failures.append("state_hash_fairness_failed_or_missing")
+    if not failure_summary_layered:
+        completeness_failures.append("failure_summary_layering_missing_or_overwritten")
+    if not positive_rcmv_formal:
+        completeness_failures.append("positive_rcmv_micro_package_missing")
+    if not failure_trace_joinable:
+        completeness_failures.append("failure_trace_samples_not_joinable")
+
+    scenario_support = _gate_d0_scenario_support(scenario_rows, aggregate_rows, replay_rows)
+    supported_core_count = sum(
+        1
+        for scenario_id in GATE_D0_CORE_SCENARIOS
+        if scenario_support.get(scenario_id, {}).get("support_level") in {"clear_support", "partial_support"}
+    )
+    s5_supported = scenario_support.get("S5", {}).get("support_level") in {
+        "clear_support",
+        "partial_support",
+    }
+
+    rpmi_rows = [row for row in aggregate_rows if row.get("algorithm_id") == "rpmi_cmv"]
+    core_rpmi_rows = [
+        row for row in rpmi_rows if str(row.get("scenario_id", "")) in GATE_D0_CORE_SCENARIOS
+    ]
+    production_success_rows = [
+        row
+        for row in rpmi_rows
+        if str(row.get("selected_action_type", "")) not in {"", "none"}
+        and _float(row.get("selected_RCMV")) > 0.0
+        and _float(row.get("failed_reservation_rate")) == 0.0
+        and _float(row.get("merge_success_rate_over_demand")) > 0.0
+        and _float(row.get("realized_unserved_demand_count")) == 0.0
+    ]
+    positive_non_none_rows = [
+        row
+        for row in rpmi_rows
+        if str(row.get("selected_action_type", "")) not in {"", "none"}
+        and _float(row.get("selected_RCMV")) > 0.0
+    ]
+
+    denominator_warning_examples = [
+        _row_example(row)
+        for row in rpmi_rows
+        if _float(row.get("failed_reservation_rate")) == 0.0
+        and (
+            _float(row.get("merge_success_count")) == 0.0
+            or _float(row.get("realized_unserved_demand_count")) > 0.0
+        )
+    ][:5]
+
+    production_realized_failure_examples = [
+        _row_example(row)
+        for row in positive_non_none_rows
+        if _float(row.get("merge_success_rate_over_demand")) == 0.0
+        or _float(row.get("realized_unserved_demand_count")) > 0.0
+        or _float(row.get("failed_reservation_rate")) > 0.0
+    ][:5]
+
+    audit_answers = {
+        "failed_reservation_rate_denominator": "generated_reservation_count",
+        "main_rpmi_cmv": _demand_denominator_summary(rpmi_rows),
+        "core_rpmi_cmv": _demand_denominator_summary(core_rpmi_rows),
+        "by_scenario_rpmi_cmv": _scenario_demand_summaries(rpmi_rows),
+        "failed_reservation_zero_but_unserved_or_no_merge_exists": bool(denominator_warning_examples),
+        "failed_reservation_zero_but_unserved_or_no_merge_examples": denominator_warning_examples,
+        "positive_rcmv_case_formally_included": positive_rcmv_formal,
+        "positive_rcmv_case_count": int(_float(positive_manifest.get("positive_rcmv_case_count"))),
+        "failure_summary_split_main_readiness_positive": failure_summary_layered,
+        "failure_summary_files": [
+            "failure_summary_main_batch.csv",
+            "failure_summary_readiness_fail.csv",
+            "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+        ],
+    }
+
+    production_effectiveness_supported = bool(production_success_rows)
+    enough_micro_support = supported_core_count >= 4 and s5_supported
+    if completeness_failures:
+        decision = "fail"
+        allowed_next_stage = "Wave 6A+ fix"
+    elif production_effectiveness_supported and enough_micro_support:
+        decision = "pass"
+        allowed_next_stage = "Wave 7"
+    elif enough_micro_support:
+        decision = "conditional_pass"
+        allowed_next_stage = "Wave 7"
+    else:
+        decision = "fail"
+        allowed_next_stage = "paper revision only"
+
+    supported_claims = [
+        "raw-gap baselines can create misleading apparent opportunities; recoverability-aware judgement is required",
+        "deterministic single-t0 micro evidence is traceable across action, edge, reservation, and event logs",
+        "S5/S8 support inventory reservation or candidate filtering value when selected_action_type=none",
+        "RCMV ranking and theta rejection are auditable in formal trace files",
+    ]
+    downgraded_claims = [
+        "boundary-speed V0 as the paper main mechanism -> deterministic micro evidence only",
+        "production action effectiveness -> limitation/future work",
+        "realized merge success improvement -> limitation/future work",
+        "RD improves demand service -> RD diagnostic/recoverability signal only",
+        "action-conditioned reservation stably improves merge success -> ablation contrast only",
+        "near-miss screening preserves effective production opportunities -> candidate filtering only",
+    ]
+    removed_claims = [
+        "lane-change production is validated",
+        "rolling-horizon reservation is validated",
+        "stochastic IDM robustness is validated",
+        "full RPMI-CMV action set is reproduced",
+    ]
+    required_fixes = []
+    if completeness_failures:
+        required_fixes.extend(completeness_failures)
+    required_fixes.extend(
+        [
+            "Revise paper text and tables so boundary-speed V0 is described as deterministic micro evidence, not the main production mechanism.",
+            "Keep production action effectiveness and realized merge success improvement in limitation/future work until a realized-valid production case exists.",
+            "Report reservation and demand denominators together in every D0-derived table.",
+            "Retain S6/S7/S6_productive failure traces as formal evidence instead of hiding predicted-valid/realized-invalid cases.",
+        ]
+    )
+
+    claim_boundaries = {
+        "production_action_effectiveness_supported": production_effectiveness_supported,
+        "positive_non_none_rcmv_exists": bool(positive_non_none_rows),
+        "positive_non_none_realized_success_count": len(production_success_rows),
+        "s6_productive_case_count": int(_float(s6_productive_manifest.get("case_count"))),
+        "allowed": [
+            "raw-gap illusion diagnosis",
+            "recoverability-aware deterministic screening/matching evidence",
+            "inventory reservation and candidate filtering micro evidence",
+        ],
+        "forbidden": [
+            "boundary-speed production creates realized merge opportunities",
+            "RPMI-CMV improves realized merge success over demand in V0",
+            "lane-change, rolling horizon, stochastic, or full action-set claims",
+        ],
+    }
+
+    failure_backtrace = {
+        "prediction_realization_status_counts": _counts(
+            row.get("prediction_realization_status", "") for row in replay_rows
+        ),
+        "production_realized_failure_examples": production_realized_failure_examples,
+        "failure_trace_sample_count": len(failure_rows),
+        "failure_trace_joinable": failure_trace_joinable,
+    }
+
+    return {
+        "decision": decision,
+        "allowed_next_stage": allowed_next_stage,
+        "supported_claims": supported_claims,
+        "downgraded_claims": downgraded_claims,
+        "removed_claims": removed_claims,
+        "required_fixes_before_next_wave": required_fixes,
+        "completeness": {
+            "pass": not completeness_failures,
+            "missing_required_inputs": missing,
+            "failures": completeness_failures,
+            "denominator_columns_present": denominator_columns_present,
+            "failed_reservation_denominator_marked": denominator_marked,
+            "state_hash_fairness_pass": state_hash_fairness_pass,
+            "failure_summary_layered": failure_summary_layered,
+            "positive_rcmv_formal": positive_rcmv_formal,
+            "gate_manifest_batch_id": gate_manifest.get("batch_id", ""),
+            "claim_table_rows": len(claim_rows),
+        },
+        "scenario_support": scenario_support,
+        "audit_answers": audit_answers,
+        "claim_boundaries": claim_boundaries,
+        "failure_backtrace": failure_backtrace,
+    }
+
+
+def _gate_d0_scenario_support(
+    scenario_rows: Sequence[Mapping[str, Any]],
+    aggregate_rows: Sequence[Mapping[str, Any]],
+    replay_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    summary_by_scenario = {str(row.get("scenario_id", "")): row for row in scenario_rows}
+    rpmi_by_scenario: dict[str, list[Mapping[str, Any]]] = {}
+    replay_by_scenario: dict[str, list[Mapping[str, Any]]] = {}
+    for row in aggregate_rows:
+        if row.get("algorithm_id") == "rpmi_cmv":
+            rpmi_by_scenario.setdefault(str(row.get("scenario_id", "")), []).append(row)
+    for row in replay_rows:
+        if row.get("algorithm_id") == "rpmi_cmv":
+            replay_by_scenario.setdefault(str(row.get("scenario_id", "")), []).append(row)
+
+    out: dict[str, dict[str, Any]] = {}
+    for scenario_id in sorted(set(summary_by_scenario) | set(rpmi_by_scenario)):
+        summary = summary_by_scenario.get(scenario_id, {})
+        rpmi_rows = rpmi_by_scenario.get(scenario_id, [])
+        replay_group = replay_by_scenario.get(scenario_id, [])
+        support = str(summary.get("mechanism_interpretability_status", "inconclusive") or "inconclusive")
+        claim_allowed, claim_forbidden, verdict = _scenario_claim_boundary(
+            scenario_id,
+            summary,
+            rpmi_rows,
+            replay_group,
+        )
+        out[scenario_id] = {
+            "support_level": support,
+            "verdict": verdict,
+            "claim_allowed": claim_allowed,
+            "claim_forbidden": claim_forbidden,
+            "raw_gap_illusion_rate": _float(summary.get("raw_gap_illusion_rate")),
+            "positive_rcmv_rate": _float(summary.get("positive_rcmv_rate")),
+            "selected_non_none_rate": _float(summary.get("selected_non_none_rate")),
+            "screening_candidate_reduction_rate": _float(
+                summary.get("screening_candidate_reduction_rate")
+            ),
+            "failed_reservation_rate": _float(summary.get("failed_reservation_rate")),
+            "merge_success_rate_over_demand": _float(
+                summary.get("merge_success_rate_over_demand")
+            ),
+            "predicted_unserved_demand_rate": _float(
+                summary.get("predicted_unserved_demand_rate")
+            ),
+            "realized_unserved_demand_rate": _float(
+                summary.get("realized_unserved_demand_rate")
+            ),
+            "notes": summary.get("notes", ""),
+            "rpmi_demand_summary": _demand_denominator_summary(rpmi_rows),
+            "replay_status_counts": _counts(
+                row.get("prediction_realization_status", "") for row in replay_group
+            ),
+        }
+    return out
+
+
+def _scenario_claim_boundary(
+    scenario_id: str,
+    summary: Mapping[str, Any],
+    rpmi_rows: Sequence[Mapping[str, Any]],
+    replay_rows: Sequence[Mapping[str, Any]],
+) -> tuple[str, str, str]:
+    sid = scenario_id.upper()
+    non_none_rate = _float(summary.get("selected_non_none_rate"))
+    positive_rate = _float(summary.get("positive_rcmv_rate"))
+    merge_rate = _float(summary.get("merge_success_rate_over_demand"))
+    realized_unserved = _float(summary.get("realized_unserved_demand_rate"))
+    candidate_reduction = _float(summary.get("screening_candidate_reduction_rate"))
+    predicted_valid_realized_invalid = any(
+        row.get("prediction_realization_status") == "predicted_valid_realized_invalid"
+        for row in replay_rows
+    )
+    has_failed_realization = (
+        realized_unserved > 0.0
+        or merge_rate == 0.0
+        or predicted_valid_realized_invalid
+        or any(_float(row.get("failed_reservation_rate")) > 0.0 for row in rpmi_rows)
+    )
+
+    if sid == "S2":
+        return (
+            "raw-gap illusion diagnosis and recoverability-aware judgement",
+            "realized demand service or production effectiveness",
+            "clear_support",
+        )
+    if sid == "S5":
+        return (
+            "inventory reservation / matching success",
+            "boundary-speed production action creates new merge opportunities",
+            "partial_support_inventory_only",
+        )
+    if sid == "S6":
+        return (
+            "RD/recoverability as diagnostic information for raw-gap illusion",
+            "RD improves demand service",
+            "partial_support_diagnostic_only",
+        )
+    if sid == "S7":
+        forbidden = "stable realized merge-success improvement"
+        if has_failed_realization:
+            forbidden = "stable realized merge-success improvement; realized layer still fails"
+        return (
+            "action-conditioned reservation differs from stale/no-action reservation accounting",
+            forbidden,
+            "partial_support_ablation_only",
+        )
+    if sid == "S8":
+        allowed = "near-miss screening candidate reduction"
+        if candidate_reduction <= 0.0:
+            allowed = "near-miss screening audit trace"
+        return (
+            allowed,
+            "screening preserves effective production opportunity or improves demand service",
+            "partial_support_filtering_only",
+        )
+    if sid == "S6_PRODUCTIVE" or sid == "S6_PRODUCTIVE".replace("_", ""):
+        return (
+            "formal positive non-none RCMV micro case with auditable prediction/execution gap",
+            "reliable production success",
+            "partial_support_prediction_only",
+        )
+    if non_none_rate > 0.0 and positive_rate > 0.0 and not has_failed_realization:
+        return (
+            "non-none positive RCMV realized success",
+            "full RPMI-CMV validation",
+            "clear_support",
+        )
+    return (
+        "deterministic trace evidence",
+        "paper main mechanism claim",
+        "partial_support",
+    )
+
+
+def _demand_denominator_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    total_demand = sum(_float(row.get("D_H")) for row in rows)
+    merge_success = sum(_float(row.get("merge_success_count")) for row in rows)
+    predicted_unserved = sum(_float(row.get("predicted_unserved_demand_count")) for row in rows)
+    realized_unserved = sum(_float(row.get("realized_unserved_demand_count")) for row in rows)
+    return {
+        "row_count": len(rows),
+        "D_H": total_demand,
+        "merge_success_count": merge_success,
+        "merge_success_rate_over_demand": _rate_float(merge_success, total_demand),
+        "predicted_unserved_demand_count": predicted_unserved,
+        "predicted_unserved_demand_rate": _rate_float(predicted_unserved, total_demand),
+        "realized_unserved_demand_count": realized_unserved,
+        "realized_unserved_demand_rate": _rate_float(realized_unserved, total_demand),
+    }
+
+
+def _scenario_demand_summaries(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("scenario_id", "")), []).append(row)
+    return {
+        scenario_id: _demand_denominator_summary(group)
+        for scenario_id, group in sorted(grouped.items())
+    }
+
+
+def _row_example(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "scenario_id": row.get("scenario_id", ""),
+        "seed": row.get("seed", ""),
+        "algorithm_id": row.get("algorithm_id", ""),
+        "selected_action_type": row.get("selected_action_type", ""),
+        "selected_RCMV": _float(row.get("selected_RCMV")),
+        "failed_reservation_rate": _float(row.get("failed_reservation_rate")),
+        "merge_success_count": _float(row.get("merge_success_count")),
+        "merge_success_rate_over_demand": _float(row.get("merge_success_rate_over_demand")),
+        "realized_unserved_demand_count": _float(row.get("realized_unserved_demand_count")),
+        "realized_unserved_demand_rate": _float(row.get("realized_unserved_demand_rate")),
+    }
+
+
+def _rows_have_columns(
+    rows: Sequence[Mapping[str, Any]],
+    required_columns: Sequence[str],
+    path: Path,
+) -> bool:
+    headers = set(rows[0].keys()) if rows else set(_csv_headers(path))
+    return set(required_columns).issubset(headers)
+
+
+def _csv_headers(path: str | Path) -> list[str]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    with file_path.open(newline="", encoding="utf-8") as file:
+        reader = csv.reader(file)
+        return next(reader, [])
+
+
+def _read_json(path: str | Path) -> dict[str, Any]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+    return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def _gate_d0_report_markdown(payload: Mapping[str, Any]) -> str:
+    audit = payload["audit_answers"]
+    main = audit["main_rpmi_cmv"]
+    core = audit["core_rpmi_cmv"]
+    lines = [
+        "# Gate D0 Report: Boundary-Speed V0 Main Mechanism Decision",
+        "",
+        f"Decision: **{payload['decision']}**",
+        "",
+        "Gate D0 is a decision report over existing Wave 6A.0/6A+ evidence. It does not add lane-change, rolling-horizon, stochastic, fallback repair, or new production mechanisms.",
+        "",
+        "## Evidence Hygiene",
+        "",
+        f"- Completeness pass: {payload['completeness']['pass']}",
+        f"- State-hash fairness pass: {payload['completeness']['state_hash_fairness_pass']}",
+        f"- Failed reservation denominator marked: {payload['completeness']['failed_reservation_denominator_marked']}",
+        f"- Failure summaries layered: {payload['completeness']['failure_summary_layered']}",
+        f"- Positive RCMV formally included: {audit['positive_rcmv_case_formally_included']} ({audit['positive_rcmv_case_count']} cases)",
+        "",
+        "## Required Denominator Answers",
+        "",
+        f"- failed_reservation_rate denominator: `{audit['failed_reservation_rate_denominator']}`.",
+        f"- main rpmi_cmv merge_success_rate_over_demand: {main['merge_success_rate_over_demand']} ({main['merge_success_count']} / {main['D_H']}).",
+        f"- main rpmi_cmv predicted_unserved_demand_count/rate: {main['predicted_unserved_demand_count']} / {main['predicted_unserved_demand_rate']}.",
+        f"- main rpmi_cmv realized_unserved_demand_count/rate: {main['realized_unserved_demand_count']} / {main['realized_unserved_demand_rate']}.",
+        f"- core S2/S5/S6/S7/S8 rpmi_cmv merge_success_rate_over_demand: {core['merge_success_rate_over_demand']} ({core['merge_success_count']} / {core['D_H']}).",
+        f"- core S2/S5/S6/S7/S8 predicted_unserved_demand_count/rate: {core['predicted_unserved_demand_count']} / {core['predicted_unserved_demand_rate']}.",
+        f"- core S2/S5/S6/S7/S8 realized_unserved_demand_count/rate: {core['realized_unserved_demand_count']} / {core['realized_unserved_demand_rate']}.",
+        f"- failed_reservation_rate=0 with merge_success_count=0 or realized_unserved_demand_count>0 exists: {audit['failed_reservation_zero_but_unserved_or_no_merge_exists']}.",
+        "",
+        "## Scenario Decisions",
+        "",
+        "| Scenario | Support | Allowed claim | Forbidden claim | Key demand result |",
+        "|---|---|---|---|---|",
+    ]
+    for scenario_id in ["S2", "S5", "S6", "S7", "S8", "S6_productive"]:
+        item = payload["scenario_support"].get(scenario_id)
+        if not item:
+            continue
+        demand = item["rpmi_demand_summary"]
+        lines.append(
+            "| {scenario} | {support} | {allowed} | {forbidden} | merge={merge}; predicted_unserved={pred}; realized_unserved={realized} |".format(
+                scenario=scenario_id,
+                support=item["support_level"],
+                allowed=item["claim_allowed"],
+                forbidden=item["claim_forbidden"],
+                merge=demand["merge_success_rate_over_demand"],
+                pred=demand["predicted_unserved_demand_rate"],
+                realized=demand["realized_unserved_demand_rate"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Failure Backtrace",
+            "",
+            f"- Trace replay status counts: `{json.dumps(payload['failure_backtrace']['prediction_realization_status_counts'], sort_keys=True)}`.",
+            f"- Joinable failure trace samples: {payload['failure_backtrace']['failure_trace_joinable']} ({payload['failure_backtrace']['failure_trace_sample_count']} rows).",
+            f"- Positive non-none RCMV realized-success count: {payload['claim_boundaries']['positive_non_none_realized_success_count']}.",
+            "",
+            "## Paper Claim Decision",
+            "",
+            "Boundary-speed V0 is not strong enough to stand as the paper's main production mechanism. It should be kept as deterministic single-t0 micro evidence. Production action effectiveness and realized merge-success improvement must be downgraded to limitation/future work.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _gate_d0_claim_plan_markdown(payload: Mapping[str, Any]) -> str:
+    lines = [
+        "# Gate D0 Claim Revision Plan",
+        "",
+        "## Keep",
+        "",
+    ]
+    lines.extend(f"- {claim}" for claim in payload["supported_claims"])
+    lines.extend(["", "## Downgrade", ""])
+    lines.extend(f"- {claim}" for claim in payload["downgraded_claims"])
+    lines.extend(["", "## Remove Or Mark Not Evaluated", ""])
+    lines.extend(f"- {claim}" for claim in payload["removed_claims"])
+    lines.extend(
+        [
+            "",
+            "## Replacement Wording",
+            "",
+            "Use: deterministic single-t0 boundary-speed V0 provides micro evidence that recoverability-aware screening and reservation diagnostics expose raw-gap illusion and inventory/matching limits.",
+            "",
+            "Do not use: boundary-speed production creates realized merge opportunities or improves merge-success over demand.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _gate_d0_fixlist_markdown(payload: Mapping[str, Any]) -> str:
+    lines = [
+        "# Gate D0 Fixlist",
+        "",
+        "These are claim and evidence-handling fixes. They are not instructions to implement Wave 7 in this gate.",
+        "",
+    ]
+    for item in payload["required_fixes_before_next_wave"]:
+        lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
 
 
 def _metrics_row(run_dir: str | Path) -> dict[str, Any]:
@@ -1941,6 +2574,7 @@ __all__ = [
     "collect_rcmv_trace",
     "collect_scenario_manifest",
     "generate_summary_tables",
+    "write_gate_d0_decision",
     "write_ablation_comparison_summary",
     "write_baseline_comparison_summary",
     "write_failure_trace_samples",
