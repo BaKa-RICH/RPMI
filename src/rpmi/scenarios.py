@@ -106,7 +106,7 @@ def make_scenario_config(
     mechanism_targets: Mapping[str, Any] | None = None,
     readiness_targets: Mapping[str, Any] | None = None,
 ) -> ScenarioConfig:
-    """Return one controlled template config for S0/S2/S5/S6."""
+    """Return one controlled deterministic template config for active Wave 6A+ scenarios."""
 
     base = _base_template(scenario_id)
     _deep_update(base["road"], dict(road or {}))
@@ -750,7 +750,7 @@ def make_road_config(config: ScenarioConfig) -> RoadConfig:
 def _base_template(scenario_id: str) -> dict[str, Any]:
     sid = scenario_id.upper()
     base = {
-        "scenario_id": sid,
+        "scenario_id": "S6_productive" if sid == "S6_PRODUCTIVE" else sid,
         "seed": 0,
         "road": {
             "lanes": 2,
@@ -793,7 +793,7 @@ def _base_template(scenario_id: str) -> dict[str, Any]:
             "v_jitter": 0.0,
         },
         "ramp": {},
-        "mechanism_targets": {"mechanism": sid},
+        "mechanism_targets": _mechanism_target_defaults(sid),
         "readiness_targets": {
             "raw_gap_count_min": 1,
             "baseline_ZR_min": 0.0,
@@ -860,6 +860,50 @@ def _base_template(scenario_id: str) -> dict[str, Any]:
                 "near_miss_count_min": 0,
             }
         )
+    elif sid == "S6_PRODUCTIVE":
+        base["vehicles"].update(
+            {
+                "boundary_pairs": ["CAV-HDV"],
+                "gap_widths": [7.0],
+                "ramp_start_x": 74.0,
+                "ramp_count": 1,
+            }
+        )
+        base["simulation"].update({"theta": 0.0, "lambda_C": 0.5})
+        base["readiness_targets"].update(
+            {
+                "raw_gap_count_min": 0,
+                "baseline_ZR_min": 1.0,
+                "near_miss_count_min": 1,
+                "boundary_cav_min": 1,
+                "raw_gap_illusion_min": 1,
+            }
+        )
+    elif sid == "S7":
+        base["vehicles"].update(
+            {
+                "boundary_pairs": ["CAV-HDV"],
+                "gap_widths": [7.0],
+                "ramp_start_x": 74.0,
+                "ramp_count": 1,
+            }
+        )
+        base["readiness_targets"].update(
+            {"raw_gap_count_min": 0, "near_miss_count_min": 1, "boundary_cav_min": 1}
+        )
+    elif sid == "S8":
+        base["vehicles"].update(
+            {
+                "boundary_pairs": ["CAV-HDV", "HDV-CAV", "CAV-CAV", "HDV-HDV"],
+                "gap_widths": [7.0, 7.0, 7.0, 7.0],
+                "ramp_start_x": 74.0,
+                "ramp_count": 1,
+            }
+        )
+        base["simulation"].update({"near_miss_delta_W_max": 8.0})
+        base["readiness_targets"].update(
+            {"raw_gap_count_min": 0, "near_miss_count_min": 1, "boundary_cav_min": 1}
+        )
     return base
 
 
@@ -874,6 +918,91 @@ def _with_template(config: ScenarioConfig, scenario_id: str) -> ScenarioConfig:
         mechanism_targets=config.mechanism_targets,
         readiness_targets=config.readiness_targets,
     )
+
+
+def _mechanism_target_defaults(scenario_id: str) -> dict[str, Any]:
+    sid = scenario_id.upper()
+    defaults: dict[str, dict[str, Any]] = {
+        "S2": {
+            "mechanism": "S2",
+            "mechanism_target": "raw_gap_illusion",
+            "expected_failure_mode": "raw gap appears available but fails reachability/safety/recoverability/matching",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV"],
+            "expected_near_miss_types": ["boundary_speed_near_miss"],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": False,
+            "expected_stale_contrast": False,
+            "expected_screening_contrast": False,
+        },
+        "S5": {
+            "mechanism": "S5",
+            "mechanism_target": "boundary_speed_production",
+            "expected_failure_mode": "near-miss edge can separate inventory-only support from production action support",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV", "HDV-CAV", "CAV-CAV", "HDV-HDV"],
+            "expected_near_miss_types": ["boundary_speed_near_miss"],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": False,
+            "expected_stale_contrast": False,
+            "expected_screening_contrast": False,
+        },
+        "S6": {
+            "mechanism": "S6",
+            "mechanism_target": "rd_recoverability_contrast",
+            "expected_failure_mode": "geometrically plausible raw gaps have poor recovery debt or poor realized service",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV", "HDV-CAV", "CAV-CAV", "HDV-HDV"],
+            "expected_near_miss_types": [],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": True,
+            "expected_stale_contrast": False,
+            "expected_screening_contrast": False,
+        },
+        "S6_PRODUCTIVE": {
+            "mechanism": "S6_productive",
+            "mechanism_target": "productive_rd_boundary_speed_contrast",
+            "expected_failure_mode": "raw-gap baseline selects invalid or low-recoverability opportunity while RPMI-CMV finds a non-none positive RCMV action",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV"],
+            "expected_near_miss_types": ["boundary_speed_near_miss"],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": True,
+            "expected_stale_contrast": False,
+            "expected_screening_contrast": False,
+        },
+        "S7": {
+            "mechanism": "S7",
+            "mechanism_target": "action_conditioned_reservation",
+            "expected_failure_mode": "stale no-action reservation inventory loses benefit after selected production action",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV"],
+            "expected_near_miss_types": ["boundary_speed_near_miss"],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": False,
+            "expected_stale_contrast": True,
+            "expected_screening_contrast": False,
+        },
+        "S8": {
+            "mechanism": "S8",
+            "mechanism_target": "near_miss_screening",
+            "expected_failure_mode": "without near-miss screening expands rejected or low-value candidates",
+            "seed_policy": "deterministic fixed seed per scenario/algorithm fairness group",
+            "jitter_policy": {"x_jitter": 0.0, "v_jitter": 0.0},
+            "expected_boundary_types": ["CAV-HDV", "HDV-CAV", "CAV-CAV", "HDV-HDV"],
+            "expected_near_miss_types": ["boundary_speed_near_miss"],
+            "expected_raw_gap_illusion": True,
+            "expected_rd_contrast": False,
+            "expected_stale_contrast": False,
+            "expected_screening_contrast": True,
+        },
+    }
+    return dict(defaults.get(sid, {"mechanism": sid, "mechanism_target": sid}))
 
 
 def _template_values(config: ScenarioConfig) -> dict[str, Any]:
@@ -990,11 +1119,29 @@ def _scenario_manifest_entry(
     state: TrafficState,
     report: ReadinessReport | None,
 ) -> dict[str, Any]:
+    vehicles = dict(config.vehicles)
+    mechanism_targets = dict(config.mechanism_targets)
     return {
         "scenario_id": config.scenario_id,
         "seed": config.seed,
         "state_hash": hash_state(state),
         "config": asdict(config),
+        "mechanism_target": mechanism_targets.get("mechanism_target", mechanism_targets.get("mechanism", "")),
+        "expected_failure_mode": mechanism_targets.get("expected_failure_mode", ""),
+        "readiness_targets": config.readiness_targets,
+        "vehicle_mix": _vehicle_mix_summary(vehicles),
+        "ramp_demand": vehicles.get("ramp_count", 0),
+        "seed_policy": mechanism_targets.get("seed_policy", "deterministic fixed seed"),
+        "jitter_policy": mechanism_targets.get(
+            "jitter_policy",
+            {"x_jitter": vehicles.get("x_jitter", 0.0), "v_jitter": vehicles.get("v_jitter", 0.0)},
+        ),
+        "expected_boundary_types": mechanism_targets.get("expected_boundary_types", vehicles.get("boundary_pairs", [])),
+        "expected_near_miss_types": mechanism_targets.get("expected_near_miss_types", []),
+        "expected_raw_gap_illusion": mechanism_targets.get("expected_raw_gap_illusion", False),
+        "expected_rd_contrast": mechanism_targets.get("expected_rd_contrast", False),
+        "expected_stale_contrast": mechanism_targets.get("expected_stale_contrast", False),
+        "expected_screening_contrast": mechanism_targets.get("expected_screening_contrast", False),
         "vehicle_count": len(state.vehicles),
         "readiness": None
         if report is None
@@ -1004,6 +1151,17 @@ def _scenario_manifest_entry(
             "algorithm_independent": report.algorithm_independent,
         },
     }
+
+
+def _vehicle_mix_summary(vehicles: Mapping[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pair in vehicles.get("boundary_pairs", []) or []:
+        for item in str(pair).split("-"):
+            counts[item] = counts.get(item, 0) + 1
+    ramp_count = int(float(vehicles.get("ramp_count", 0) or 0))
+    if ramp_count:
+        counts["ramp_CAV"] = ramp_count
+    return counts
 
 
 def _apply_sweep_override(

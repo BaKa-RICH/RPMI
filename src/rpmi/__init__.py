@@ -162,8 +162,16 @@ from rpmi.analysis import (
     aggregate_readiness,
     build_evidence_package,
     collect_rcmv_trace,
+    collect_scenario_manifest,
     generate_summary_tables,
+    write_ablation_comparison_summary,
+    write_baseline_comparison_summary,
+    write_failure_trace_samples,
+    write_rcmv_trace_top_actions,
+    write_scenario_mechanism_summary,
+    write_sensitivity_local_summary,
     write_state_hash_fairness_csv,
+    write_trace_replay_summaries,
 )
 from rpmi.runner import (
     AblationConfig,
@@ -263,6 +271,7 @@ __all__ = [
     "clip_accel_for_kinematics",
     "coerce_action_config",
     "collect_rcmv_trace",
+    "collect_scenario_manifest",
     "combine_nominal_and_action",
     "commands_for_action",
     "config_to_canonical_dict",
@@ -359,7 +368,14 @@ __all__ = [
     "validate_single_action",
     "verify_state_hash_fairness",
     "write_scenario_manifest",
+    "write_ablation_comparison_summary",
+    "write_baseline_comparison_summary",
+    "write_failure_trace_samples",
+    "write_rcmv_trace_top_actions",
+    "write_scenario_mechanism_summary",
+    "write_sensitivity_local_summary",
     "write_state_hash_fairness_csv",
+    "write_trace_replay_summaries",
 ]
 
 __version__ = "0.1.0"

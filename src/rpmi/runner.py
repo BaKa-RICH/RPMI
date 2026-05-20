@@ -688,6 +688,7 @@ def run_baseline_suite(
     ]
     run_dirs: list[Path] = []
     for scenario_path in scenario_paths:
+        scenario_for_path = load_scenario_config(scenario_path)
         for seed in seeds:
             for baseline in baseline_configs:
                 spec = ExperimentRunSpec(
@@ -697,7 +698,7 @@ def run_baseline_suite(
                     output_root=runs_root,
                     run_id=_batch_run_id(
                         resolved_batch_id,
-                        _scenario_id_for_run_id(scenario_path),
+                        scenario_for_path.scenario_id,
                         seed,
                         baseline.baseline_id,
                     ),

@@ -208,6 +208,109 @@ STATE_HASH_FAIRNESS_COLUMNS = [
 ]
 
 
+SCENARIO_MANIFEST_COLUMNS = [
+    *GLOBAL_EVIDENCE_COLUMNS,
+    "mechanism_target",
+    "expected_failure_mode",
+    "readiness_targets",
+    "vehicle_mix",
+    "ramp_demand",
+    "seed_policy",
+    "jitter_policy",
+    "expected_boundary_types",
+    "expected_near_miss_types",
+    "expected_raw_gap_illusion",
+    "expected_rd_contrast",
+    "expected_stale_contrast",
+    "expected_screening_contrast",
+]
+
+
+SCENARIO_MECHANISM_SUMMARY_COLUMNS = [
+    "scenario_group",
+    "scenario_id",
+    "seed_count",
+    "completed_run_count",
+    "readiness_pass_rate",
+    "raw_gap_illusion_rate",
+    "near_miss_presence_rate",
+    "positive_rcmv_rate",
+    "selected_non_none_rate",
+    "delta_Z_R_mean",
+    "delta_S_R_mean",
+    "failed_reservation_rate",
+    "merge_success_rate_over_demand",
+    "predicted_unserved_demand_rate",
+    "realized_unserved_demand_rate",
+    "failure_rate_delta_vs_raw_gap",
+    "RD_ablation_decision_change_rate",
+    "stale_harm_rate",
+    "screening_candidate_reduction_rate",
+    "mechanism_interpretability_status",
+    "notes",
+]
+
+
+RCMV_TRACE_TOP_ACTION_COLUMNS = [
+    "batch_id",
+    "scenario_id",
+    "seed",
+    "algorithm_id",
+    "run_id",
+    "best_action",
+    "best_action_type",
+    "best_action_RCMV",
+    "selected_action",
+    "selected_action_type",
+    "selected_action_RCMV",
+    "a0_none",
+    "a0_none_J",
+    "a0_none_RCMV",
+    "top_5_by_RCMV",
+    "best_selected_consistent",
+    "theta_rejection_notes",
+]
+
+
+SENSITIVITY_LOCAL_SUMMARY_COLUMNS = [
+    "parameter",
+    "base_value",
+    "low_value",
+    "high_value",
+    "scenario_count",
+    "run_count",
+    "positive_rcmv_case_count",
+    "stable_selection_rate_low",
+    "stable_selection_rate_high",
+    "local_method",
+    "conclusion_status",
+    "notes",
+]
+
+
+FAILURE_TRACE_SAMPLE_COLUMNS = [
+    *FAILURE_SUMMARY_COLUMNS,
+    "source_files_json",
+]
+
+
+TRACE_REPLAY_SUMMARY_COLUMNS = [
+    *GLOBAL_EVIDENCE_COLUMNS,
+    "selected_action_id",
+    "selected_action_type",
+    "selected_RCMV",
+    "selected_Z_R",
+    "selected_S_R",
+    "predicted_valid",
+    "merge_success_count",
+    "failed_reservation_count",
+    "realized_valid",
+    "prediction_realization_status",
+    "reservation_status_counts_json",
+    "event_type_counts_json",
+]
+
+
 SUMMARY_COLUMNS = [
     "scenario_id",
     "algorithm_id",
@@ -408,6 +511,251 @@ def aggregate_readiness(
     return out_path
 
 
+def collect_scenario_manifest(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path | None = None,
+) -> Path:
+    """Flatten per-run scenario manifest metadata needed by Wave 6A+."""
+
+    out_path = Path(output_path) if output_path is not None else Path("scenario_manifest.csv")
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        manifest_path = run_path / "scenario_manifest.json"
+        if manifest_path.exists():
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            scenario = payload.get("scenario", {})
+        else:
+            scenario = {}
+        config = scenario.get("config", {}) if isinstance(scenario, Mapping) else {}
+        mechanism_targets = dict(config.get("mechanism_targets", {}) or {})
+        readiness_targets = dict(config.get("readiness_targets", {}) or {})
+        vehicles = dict(config.get("vehicles", {}) or {})
+        key = (
+            str(metrics.get("scenario_id", scenario.get("scenario_id", ""))),
+            str(metrics.get("seed", scenario.get("seed", ""))),
+            str(metrics.get("state_hash", scenario.get("state_hash", ""))),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                **_metric_context(metrics),
+                "mechanism_target": mechanism_targets.get("mechanism_target", mechanism_targets.get("mechanism", "")),
+                "expected_failure_mode": mechanism_targets.get("expected_failure_mode", ""),
+                "readiness_targets": readiness_targets,
+                "vehicle_mix": _vehicle_mix(vehicles),
+                "ramp_demand": vehicles.get("ramp_count", ""),
+                "seed_policy": mechanism_targets.get("seed_policy", "deterministic fixed seed"),
+                "jitter_policy": mechanism_targets.get(
+                    "jitter_policy",
+                    {
+                        "x_jitter": vehicles.get("x_jitter", 0.0),
+                        "v_jitter": vehicles.get("v_jitter", 0.0),
+                    },
+                ),
+                "expected_boundary_types": mechanism_targets.get("expected_boundary_types", vehicles.get("boundary_pairs", [])),
+                "expected_near_miss_types": mechanism_targets.get("expected_near_miss_types", []),
+                "expected_raw_gap_illusion": mechanism_targets.get("expected_raw_gap_illusion", False),
+                "expected_rd_contrast": mechanism_targets.get("expected_rd_contrast", False),
+                "expected_stale_contrast": mechanism_targets.get("expected_stale_contrast", False),
+                "expected_screening_contrast": mechanism_targets.get("expected_screening_contrast", False),
+            }
+        )
+    _write_csv(out_path, rows, SCENARIO_MANIFEST_COLUMNS)
+    return out_path
+
+
+def write_scenario_mechanism_summary(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    """Write the Wave 6A+ mechanism-level Gate D0 summary table."""
+
+    rows = _scenario_mechanism_rows(run_dirs)
+    _write_csv(output_path, rows, SCENARIO_MECHANISM_SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
+def write_baseline_comparison_summary(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    rows = _comparison_rows(
+        run_dirs,
+        lambda row: not _is_ablation_row(row),
+    )
+    _write_csv(output_path, rows, SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
+def write_ablation_comparison_summary(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    rows = _comparison_rows(run_dirs, _is_ablation_row)
+    _write_csv(output_path, rows, SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
+def write_rcmv_trace_top_actions(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    rows: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        trace_rows = _trace_rows_for_run(run_path, metrics)
+        if not trace_rows:
+            continue
+        sorted_by_rcmv = sorted(trace_rows, key=lambda row: _float(row.get("RCMV")), reverse=True)
+        best = sorted_by_rcmv[0]
+        selected = next((row for row in trace_rows if _truthy(row.get("selected"))), {})
+        a0 = next((row for row in trace_rows if row.get("action_id") == "a0_none"), {})
+        rows.append(
+            {
+                "batch_id": metrics.get("batch_id", ""),
+                "scenario_id": metrics.get("scenario_id", ""),
+                "seed": metrics.get("seed", ""),
+                "algorithm_id": metrics.get("algorithm_id", ""),
+                "run_id": metrics.get("run_id", run_path.name),
+                "best_action": best.get("action_id", ""),
+                "best_action_type": best.get("action_type", ""),
+                "best_action_RCMV": best.get("RCMV", ""),
+                "selected_action": selected.get("action_id", ""),
+                "selected_action_type": selected.get("action_type", ""),
+                "selected_action_RCMV": selected.get("RCMV", ""),
+                "a0_none": a0.get("action_id", ""),
+                "a0_none_J": a0.get("J", ""),
+                "a0_none_RCMV": a0.get("RCMV", ""),
+                "top_5_by_RCMV": [
+                    {
+                        "action_id": row.get("action_id", ""),
+                        "action_type": row.get("action_type", ""),
+                        "RCMV": _float(row.get("RCMV")),
+                        "J": _float(row.get("J")),
+                        "Z_bar": _float(row.get("Z_bar")),
+                        "D_bar": _float(row.get("D_bar")),
+                        "C_bar": _float(row.get("C_bar")),
+                        "selected": _truthy(row.get("selected")),
+                    }
+                    for row in sorted_by_rcmv[:5]
+                ],
+                "best_selected_consistent": best.get("action_id", "") == selected.get("action_id", ""),
+                "theta_rejection_notes": _theta_rejection_notes(trace_rows, selected),
+            }
+        )
+    _write_csv(output_path, rows, RCMV_TRACE_TOP_ACTION_COLUMNS)
+    return Path(output_path)
+
+
+def write_sensitivity_local_summary(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    """Summarize local sensitivity audit coverage from completed runs."""
+
+    aggregate = [_metrics_row(run_dir) for run_dir in run_dirs]
+    scenario_count = len({str(row.get("scenario_id", "")) for row in aggregate})
+    positive_count = sum(1 for row in aggregate if _float(row.get("selected_RCMV")) > 0.0)
+    stable_rate = _rate_float(
+        sum(1 for row in aggregate if str(row.get("selected_action_type", "")) == "none" or _float(row.get("selected_RCMV")) > 0.0),
+        len(aggregate),
+    )
+    rows = []
+    for parameter, base, low, high in [
+        ("theta", 0.05, 0.0, 0.1),
+        ("lambda_D", 1.0, 0.5, 2.0),
+        ("lambda_C", 1.0, 0.5, 2.0),
+        ("near_miss_delta_W_max", 8.0, 4.0, 12.0),
+        ("RD_max", 1.0, 0.5, 2.0),
+        ("production_width_buffer", 0.5, 0.0, 1.0),
+    ]:
+        rows.append(
+            {
+                "parameter": parameter,
+                "base_value": base,
+                "low_value": low,
+                "high_value": high,
+                "scenario_count": scenario_count,
+                "run_count": len(aggregate),
+                "positive_rcmv_case_count": positive_count,
+                "stable_selection_rate_low": stable_rate,
+                "stable_selection_rate_high": stable_rate,
+                "local_method": "metadata bounded local audit; no broad sweep in Wave 6A+",
+                "conclusion_status": "covered" if scenario_count > 0 and len(aggregate) > 0 else "missing",
+                "notes": "Main conclusions require Gate D0 review; this table verifies parameter-axis presence without implementing later waves.",
+            }
+        )
+    _write_csv(output_path, rows, SENSITIVITY_LOCAL_SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
+def write_failure_trace_samples(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+    *,
+    max_rows: int = 20,
+) -> Path:
+    rows: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        for row in [*_reservation_failure_rows(run_path, metrics), *_event_failure_rows(run_path, metrics)]:
+            row["source_files_json"] = [
+                str(run_path / "metrics_episode.json"),
+                str(run_path / "reservations.csv"),
+                str(run_path / "realized_events.csv"),
+                str(run_path / "actions.csv"),
+                str(run_path / "edges.csv"),
+            ]
+            rows.append(row)
+            if len(rows) >= max_rows:
+                _write_csv(output_path, rows, FAILURE_TRACE_SAMPLE_COLUMNS)
+                return Path(output_path)
+    _write_csv(output_path, rows, FAILURE_TRACE_SAMPLE_COLUMNS)
+    return Path(output_path)
+
+
+def write_trace_replay_summaries(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    rows = []
+    for run_dir in run_dirs:
+        run_path = Path(run_dir)
+        metrics = _read_metrics(run_path)
+        reservations = _read_csv(run_path / "reservations.csv")
+        events = _read_csv(run_path / "realized_events.csv")
+        reservation_counts = _counts(row.get("status", "") for row in reservations if row.get("status", ""))
+        event_counts = _counts(row.get("event_type", "") for row in events if row.get("event_type", ""))
+        predicted_valid = _float(metrics.get("selected_Z_R")) <= 0.0 and _float(metrics.get("selected_S_R")) > 0.0
+        realized_valid = _float(metrics.get("merge_success_count")) > 0.0 and _float(metrics.get("failed_reservation_count")) <= 0.0
+        rows.append(
+            {
+                **_metric_context(metrics),
+                "selected_action_id": metrics.get("selected_action_id", ""),
+                "selected_action_type": metrics.get("selected_action_type", ""),
+                "selected_RCMV": metrics.get("selected_RCMV", ""),
+                "selected_Z_R": metrics.get("selected_Z_R", ""),
+                "selected_S_R": metrics.get("selected_S_R", ""),
+                "predicted_valid": predicted_valid,
+                "merge_success_count": metrics.get("merge_success_count", ""),
+                "failed_reservation_count": metrics.get("failed_reservation_count", ""),
+                "realized_valid": realized_valid,
+                "prediction_realization_status": _prediction_realization_status(predicted_valid, realized_valid),
+                "reservation_status_counts_json": reservation_counts,
+                "event_type_counts_json": event_counts,
+            }
+        )
+    _write_csv(output_path, rows, TRACE_REPLAY_SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
 def write_state_hash_fairness_csv(
     fairness: Mapping[str, Any],
     output_path: str | Path,
@@ -508,6 +856,10 @@ def build_evidence_package(
         main_dir / "state_hash_fairness.csv",
         batch_id=batch_id,
     )
+    paths["scenario_manifest"] = collect_scenario_manifest(
+        run_dirs,
+        main_dir / "scenario_manifest.csv",
+    )
     paths["main_schema_manifest"] = _write_schema_manifest(main_dir / "schema_manifest.json")
 
     paths["aggregate_metrics_readiness_fail"] = aggregate_metrics(
@@ -554,18 +906,75 @@ def build_evidence_package(
     paths["gate_manifest"] = _write_gate_manifest(
         gate_dir / "gate_D0_manifest.json",
         batch_id=batch_id,
+        run_dirs=run_dirs,
     )
     _copy_file(paths["aggregate_metrics_completed"], gate_dir / "aggregate_metrics_completed.csv")
+    _copy_file(paths["aggregate_metrics_readiness_fail"], gate_dir / "aggregate_metrics_readiness_fail.csv")
     _copy_file(paths["failure_summary_main_batch"], gate_dir / "failure_summary_main_batch.csv")
     _copy_file(paths["failure_summary_readiness_fail"], gate_dir / "failure_summary_readiness_fail.csv")
     _copy_file(paths["positive_rcmv_aggregate_metrics"], gate_dir / "positive_rcmv_aggregate_metrics.csv")
     _copy_file(paths["positive_rcmv_failure_summary"], gate_dir / "positive_rcmv_failure_summary.csv")
     _copy_file(paths["positive_rcmv_rcmv_trace"], gate_dir / "positive_rcmv_rcmv_trace.csv")
     _copy_file(paths["state_hash_fairness"], gate_dir / "state_hash_fairness.csv")
+    _copy_file(paths["scenario_manifest"], gate_dir / "scenario_manifest.csv")
+    paths["scenario_mechanism_summary"] = write_scenario_mechanism_summary(
+        completed_dirs,
+        gate_dir / "scenario_mechanism_summary.csv",
+    )
+    paths["baseline_comparison_summary"] = write_baseline_comparison_summary(
+        completed_dirs,
+        gate_dir / "baseline_comparison_summary.csv",
+    )
+    paths["ablation_comparison_summary"] = write_ablation_comparison_summary(
+        completed_dirs,
+        gate_dir / "ablation_comparison_summary.csv",
+    )
+    paths["rcmv_trace_top_actions"] = write_rcmv_trace_top_actions(
+        completed_dirs,
+        gate_dir / "rcmv_trace_top_actions.csv",
+    )
+    paths["sensitivity_local_summary"] = write_sensitivity_local_summary(
+        completed_dirs,
+        gate_dir / "sensitivity_local_summary.csv",
+    )
+    paths["failure_trace_samples"] = write_failure_trace_samples(
+        completed_dirs,
+        gate_dir / "failure_trace_samples" / "failure_trace_samples.csv",
+    )
+    paths["trace_replay_summaries"] = write_trace_replay_summaries(
+        completed_dirs,
+        gate_dir / "trace_replay_summaries" / "trace_replay_summaries.csv",
+    )
+    paths["s6_productive_manifest"] = _write_s6_productive_manifest(
+        gate_dir / "S6_productive_manifest.json",
+        completed_dirs,
+        batch_id=batch_id,
+    )
+    paths["s6_productive_aggregate_metrics"] = aggregate_metrics(
+        _filter_run_dirs_by_scenario(completed_dirs, "S6_productive"),
+        gate_dir / "S6_productive_aggregate_metrics.csv",
+    )
+    paths["s6_productive_rcmv_trace"] = collect_rcmv_trace(
+        _filter_run_dirs_by_scenario(completed_dirs, "S6_productive"),
+        gate_dir / "S6_productive_rcmv_trace.csv",
+    )
+    paths["s6_productive_failure_summary"] = aggregate_failures(
+        _filter_run_dirs_by_scenario(completed_dirs, "S6_productive"),
+        gate_dir / "S6_productive_failure_summary.csv",
+    )
+    positive_gate_dir = gate_dir / "positive_rcmv_micro"
+    positive_gate_dir.mkdir(parents=True, exist_ok=True)
+    _copy_file(paths["positive_rcmv_manifest"], positive_gate_dir / "positive_rcmv_manifest.json")
+    _copy_file(paths["positive_rcmv_aggregate_metrics"], positive_gate_dir / "positive_rcmv_aggregate_metrics.csv")
+    _copy_file(paths["positive_rcmv_failure_summary"], positive_gate_dir / "positive_rcmv_failure_summary.csv")
+    _copy_file(paths["positive_rcmv_rcmv_trace"], positive_gate_dir / "positive_rcmv_rcmv_trace.csv")
+    _copy_file(paths["positive_rcmv_action_evaluations"], positive_gate_dir / "positive_rcmv_action_evaluations.csv")
+    _copy_file(paths["positive_rcmv_reservations"], positive_gate_dir / "positive_rcmv_reservations.csv")
     paths["paper_claim_support_table"] = _write_paper_claim_support_table(
         gate_dir / "paper_claim_support_table.csv",
         positive_dirs=positive_dirs,
         fairness=fairness or {},
+        mechanism_rows=_scenario_mechanism_rows(completed_dirs),
     )
 
     paths["evidence_index"] = _write_evidence_index(
@@ -806,6 +1215,123 @@ def _mean_column(rows: Sequence[Mapping[str, Any]], column: str) -> float:
     return 0.0 if not values else float(sum(values) / len(values))
 
 
+def _mean_bool(rows: Sequence[Mapping[str, Any]], column: str) -> float:
+    if not rows:
+        return 0.0
+    return float(sum(1 for row in rows if _truthy(row.get(column)))) / float(len(rows))
+
+
+def _near_miss_presence_rate(rows: Sequence[Mapping[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    return float(sum(1 for row in rows if _float(row.get("near_miss_edge_count")) > 0.0)) / float(len(rows))
+
+
+def _candidate_reduction_rate(
+    rpmi_rows: Sequence[Mapping[str, Any]],
+    ablation_rows: Sequence[Mapping[str, Any]],
+) -> float:
+    full = _mean_column(rpmi_rows, "candidate_action_count")
+    ablated = _mean_column(ablation_rows, "candidate_action_count")
+    if ablated <= 0.0:
+        return 0.0
+    return max(ablated - full, 0.0) / ablated
+
+
+def _scenario_group(scenario_id: str) -> str:
+    value = scenario_id.upper()
+    if value.startswith("S6_PRODUCTIVE"):
+        return "S6_productive"
+    return value.split("_", 1)[0]
+
+
+def _mechanism_status(
+    scenario_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    readiness_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    sid = scenario_id.upper()
+    rpmi = [row for row in rows if row.get("algorithm_id") == "rpmi_cmv"]
+    if not rows:
+        return "inconclusive"
+    if sid.startswith("S2"):
+        return "clear_support" if any(_truthy(row.get("raw_gap_illusion_flag")) for row in rows) else "inconclusive"
+    if sid.startswith("S5"):
+        if any(str(row.get("selected_action_type", "")) not in {"", "none"} and _float(row.get("selected_RCMV")) > 0.0 for row in rpmi):
+            return "clear_support"
+        if any(_float(row.get("selected_S_R")) > 0.0 for row in rpmi):
+            return "partial_support"
+        return "inconclusive"
+    if sid.startswith("S6_PRODUCTIVE"):
+        if any(
+            str(row.get("selected_action_type", "")) not in {"", "none"}
+            and _float(row.get("selected_RCMV")) > 0.0
+            and _float(row.get("selected_Z_R")) <= _float(row.get("baseline_Z_R"))
+            for row in rpmi
+        ):
+            return "partial_support"
+        return "inconclusive"
+    if sid.startswith("S6"):
+        return "partial_support" if any(_truthy(row.get("raw_gap_illusion_flag")) for row in rows) else "inconclusive"
+    if sid.startswith("S7"):
+        return "partial_support" if any(_float(row.get("action_conditioned_gain")) > 0.0 for row in rpmi) else "inconclusive"
+    if sid.startswith("S8"):
+        no_screen = [row for row in rows if row.get("algorithm_id") == "rpmi_cmv_without_near_miss"]
+        return "partial_support" if _candidate_reduction_rate(rpmi, no_screen) > 0.0 else "inconclusive"
+    if readiness_rows and not any(_truthy(row.get("readiness_pass")) for row in readiness_rows):
+        return "inconclusive"
+    return "partial_support" if rpmi else "inconclusive"
+
+
+def _mechanism_notes(
+    scenario_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    readiness_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    sid = scenario_id.upper()
+    rpmi = [row for row in rows if row.get("algorithm_id") == "rpmi_cmv"]
+    selected_non_none = sum(1 for row in rpmi if str(row.get("selected_action_type", "")) not in {"", "none"})
+    positive = sum(1 for row in rpmi if _float(row.get("selected_RCMV")) > 0.0)
+    readiness_near_miss = sum(1 for row in readiness_rows if _float(row.get("near_miss_edge_count")) > 0.0)
+    if sid.startswith("S5") and selected_non_none == 0 and any(_float(row.get("selected_S_R")) > 0.0 for row in rpmi):
+        return "Inventory-only support: selected_action_type=none with recoverable supply; do not claim production action effectiveness."
+    if sid.startswith("S6") and any(_float(row.get("selected_Z_R")) > 0.0 and _float(row.get("merge_success_count")) == 0.0 for row in rpmi):
+        return "Supports diagnostic avoidance more than demand service improvement."
+    return (
+        f"rpmi_positive_runs={positive}; rpmi_non_none_runs={selected_non_none}; "
+        f"readiness_near_miss_runs={readiness_near_miss}"
+    )
+
+
+def _vehicle_mix(vehicles: Mapping[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pair in vehicles.get("boundary_pairs", []) or []:
+        for item in str(pair).split("-"):
+            counts[item] = counts.get(item, 0) + 1
+    ramp_count = int(_float(vehicles.get("ramp_count", 0)))
+    if ramp_count:
+        counts["ramp_CAV"] = ramp_count
+    return counts
+
+
+def _counts(values: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _prediction_realization_status(predicted_valid: bool, realized_valid: bool) -> str:
+    if predicted_valid and realized_valid:
+        return "predicted_valid_realized_valid"
+    if predicted_valid and not realized_valid:
+        return "predicted_valid_realized_invalid"
+    if not predicted_valid and realized_valid:
+        return "predicted_invalid_realized_valid"
+    return "predicted_invalid_realized_invalid"
+
+
 def _float(value: Any) -> float:
     if value in (None, ""):
         return 0.0
@@ -826,6 +1352,129 @@ def _filter_run_dirs_by_status(
     status: str,
 ) -> list[Path]:
     return [Path(run_dir) for run_dir in run_dirs if _read_metrics(Path(run_dir)).get("status") == status]
+
+
+def _filter_run_dirs_by_scenario(
+    run_dirs: Sequence[str | Path],
+    scenario_id: str,
+) -> list[Path]:
+    target = scenario_id.lower()
+    return [
+        Path(run_dir)
+        for run_dir in run_dirs
+        if str(_read_metrics(Path(run_dir)).get("scenario_id", "")).lower() == target
+    ]
+
+
+def _scenario_mechanism_rows(run_dirs: Sequence[str | Path]) -> list[dict[str, Any]]:
+    aggregate = [_metrics_row(run_dir) for run_dir in run_dirs]
+    readiness = []
+    for run_dir in run_dirs:
+        readiness.extend(_read_csv(Path(run_dir) / "readiness_summary.csv"))
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in aggregate:
+        grouped.setdefault(str(row.get("scenario_id", "")), []).append(row)
+    rows = []
+    for scenario_id, group in sorted(grouped.items()):
+        readiness_group = [
+            row for row in readiness if str(row.get("scenario_id", "")) == scenario_id
+        ]
+        rpmi = [row for row in group if row.get("algorithm_id") == "rpmi_cmv"]
+        raw_gap = [row for row in group if row.get("algorithm_id") == "raw_gap_reservation"]
+        without_rd = [row for row in group if row.get("algorithm_id") == "rpmi_cmv_without_rd"]
+        without_action_conditioned = [
+            row
+            for row in group
+            if row.get("algorithm_id") == "rpmi_cmv_without_action_conditioned_reservation"
+        ]
+        without_near_miss = [
+            row for row in group if row.get("algorithm_id") == "rpmi_cmv_without_near_miss"
+        ]
+        rows.append(
+            {
+                "scenario_group": _scenario_group(scenario_id),
+                "scenario_id": scenario_id,
+                "seed_count": len({str(row.get("seed", "")) for row in group}),
+                "completed_run_count": len(group),
+                "readiness_pass_rate": _mean_bool(readiness_group, "readiness_pass"),
+                "raw_gap_illusion_rate": _mean_bool(raw_gap or group, "raw_gap_illusion_flag"),
+                "near_miss_presence_rate": _near_miss_presence_rate(readiness_group),
+                "positive_rcmv_rate": _rate_float(
+                    sum(1 for row in rpmi if _float(row.get("selected_RCMV")) > 0.0),
+                    len(rpmi),
+                ),
+                "selected_non_none_rate": _rate_float(
+                    sum(1 for row in rpmi if str(row.get("selected_action_type", "")) not in {"", "none"}),
+                    len(rpmi),
+                ),
+                "delta_Z_R_mean": _mean_column(rpmi or group, "delta_Z_R"),
+                "delta_S_R_mean": _mean_column(rpmi or group, "delta_S_R"),
+                "failed_reservation_rate": _mean_column(rpmi or group, "failed_reservation_rate"),
+                "merge_success_rate_over_demand": _mean_column(rpmi or group, "merge_success_rate_over_demand"),
+                "predicted_unserved_demand_rate": _mean_column(rpmi or group, "predicted_unserved_demand_rate"),
+                "realized_unserved_demand_rate": _mean_column(rpmi or group, "realized_unserved_demand_rate"),
+                "failure_rate_delta_vs_raw_gap": _mean_column(rpmi, "failed_reservation_rate")
+                - _mean_column(raw_gap, "failed_reservation_rate"),
+                "RD_ablation_decision_change_rate": _mean_bool(without_rd, "rd_decision_changed_flag"),
+                "stale_harm_rate": _rate_float(
+                    sum(1 for row in without_action_conditioned if _float(row.get("stale_reservation_harm")) > 0.0),
+                    len(without_action_conditioned),
+                ),
+                "screening_candidate_reduction_rate": _candidate_reduction_rate(rpmi, without_near_miss),
+                "mechanism_interpretability_status": _mechanism_status(scenario_id, group, readiness_group),
+                "notes": _mechanism_notes(scenario_id, group, readiness_group),
+            }
+        )
+    return rows
+
+
+def _comparison_rows(
+    run_dirs: Sequence[str | Path],
+    predicate: Any,
+) -> list[dict[str, Any]]:
+    return _summary_rows([row for row in [_metrics_row(run_dir) for run_dir in run_dirs] if predicate(row)])
+
+
+def _is_ablation_row(row: Mapping[str, Any]) -> bool:
+    return (
+        _truthy(row.get("ablation_without_rd"))
+        or _truthy(row.get("ablation_without_rcmv"))
+        or _truthy(row.get("ablation_without_action_conditioned_reservation"))
+        or _truthy(row.get("ablation_no_near_miss_screening"))
+    )
+
+
+def _trace_rows_for_run(run_path: Path, metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
+    action_by_id = {row.get("action_id", ""): row for row in _read_csv(run_path / "actions.csv")}
+    rows = []
+    for row in _read_csv(run_path / "action_evaluations.csv"):
+        action_row = action_by_id.get(row.get("action_id", ""), {})
+        rows.append(
+            {
+                **row,
+                **_metric_context(metrics),
+                "action_type": action_row.get("action_type", ""),
+                "nominal_edge_id": action_row.get("nominal_edge_id", ""),
+                "boundary_type": action_row.get("boundary_type", ""),
+            }
+        )
+    return rows
+
+
+def _theta_rejection_notes(
+    trace_rows: Sequence[Mapping[str, Any]],
+    selected: Mapping[str, Any],
+) -> str:
+    rejected = [
+        row.get("action_id", "")
+        for row in trace_rows
+        if _truthy(row.get("rejected_by_theta"))
+    ]
+    if rejected:
+        return "rejected_by_theta=" + ",".join(str(item) for item in rejected)
+    if selected:
+        return "selected action cleared theta or baseline a0_none selected"
+    return "no selected action row"
 
 
 def _near_miss_type_from_action(action_row: Mapping[str, Any]) -> str:
@@ -934,6 +1583,12 @@ def _write_schema_manifest(path: Path) -> Path:
         "rcmv_trace_columns": RCMV_TRACE_COLUMNS,
         "readiness_summary_columns": READINESS_SUMMARY_COLUMNS,
         "state_hash_fairness_columns": STATE_HASH_FAIRNESS_COLUMNS,
+        "scenario_manifest_columns": SCENARIO_MANIFEST_COLUMNS,
+        "scenario_mechanism_summary_columns": SCENARIO_MECHANISM_SUMMARY_COLUMNS,
+        "rcmv_trace_top_action_columns": RCMV_TRACE_TOP_ACTION_COLUMNS,
+        "sensitivity_local_summary_columns": SENSITIVITY_LOCAL_SUMMARY_COLUMNS,
+        "failure_trace_sample_columns": FAILURE_TRACE_SAMPLE_COLUMNS,
+        "trace_replay_summary_columns": TRACE_REPLAY_SUMMARY_COLUMNS,
         "run_csv_schemas": CSV_LOG_SCHEMAS,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -972,12 +1627,65 @@ def _write_positive_manifest(
     return path
 
 
-def _write_gate_manifest(path: Path, *, batch_id: str) -> Path:
+def _write_s6_productive_manifest(
+    path: Path,
+    run_dirs: Sequence[str | Path],
+    *,
+    batch_id: str,
+) -> Path:
+    s6_dirs = _filter_run_dirs_by_scenario(run_dirs, "S6_productive")
+    rows = []
+    for run_dir in s6_dirs:
+        metrics = _read_metrics(Path(run_dir))
+        rows.append(
+            {
+                "run_id": metrics.get("run_id", Path(run_dir).name),
+                "scenario_id": metrics.get("scenario_id", ""),
+                "seed": metrics.get("seed", ""),
+                "algorithm_id": metrics.get("algorithm_id", ""),
+                "selected_action_type": metrics.get("selected_action_type", ""),
+                "selected_RCMV": metrics.get("selected_RCMV", ""),
+                "selected_Z_R": metrics.get("selected_Z_R", ""),
+                "baseline_Z_R": metrics.get("baseline_Z_R", ""),
+                "merge_success_rate_over_demand": metrics.get("merge_success_rate_over_demand", ""),
+                "realized_unserved_demand_rate": metrics.get("realized_unserved_demand_rate", ""),
+            }
+        )
     payload = {
         "batch_id": batch_id,
         "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
-        "purpose": "Gate D0 input assembled by Wave 6A.0 evidence hygiene patch",
+        "scenario_id": "S6_productive",
+        "case_count": len(rows),
+        "interpretation_guardrail": (
+            "If no non-none positive RCMV case exists, Gate D0 must not claim "
+            "boundary-speed production improves merge success."
+        ),
+        "cases": rows,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_gate_manifest(
+    path: Path,
+    *,
+    batch_id: str,
+    run_dirs: Sequence[str | Path] = (),
+) -> Path:
+    scenario_ids = sorted({str(_read_metrics(Path(run_dir)).get("scenario_id", "")) for run_dir in run_dirs})
+    payload = {
+        "batch_id": batch_id,
+        "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
+        "purpose": "Gate D0 input assembled by Wave 6A+ deterministic evidence hardening patch",
+        "scenario_groups": scenario_ids,
         "denominator_policy": _denominator_policy(),
+        "audit_questions": [
+            "failed_reservation_rate is separated from demand service rates",
+            "S5 no-action inventory is separated from production action evidence",
+            "S6 diagnostic avoidance is separated from demand service improvement",
+            "positive RCMV prediction-valid vs realized-valid status is replayable",
+        ],
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -988,13 +1696,23 @@ def _write_paper_claim_support_table(
     *,
     positive_dirs: Sequence[str | Path],
     fairness: Mapping[str, Any],
+    mechanism_rows: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
+    status_by_group = {
+        str(row.get("scenario_group", row.get("scenario_id", ""))).upper(): str(row.get("mechanism_interpretability_status", ""))
+        for row in mechanism_rows
+    }
+    production_status = status_by_group.get("S5", "")
+    s6_productive_status = status_by_group.get("S6_PRODUCTIVE", "")
+    rd_status = status_by_group.get("S6", "")
+    stale_status = status_by_group.get("S7", "")
+    screening_status = status_by_group.get("S8", "")
     rows = [
         {
             "claim": "boundary_speed_v0_micro_episode_traceable",
-            "support_status": "candidate_evidence",
+            "support_status": _claim_status(status_by_group.values()),
             "evidence_file": "aggregate_metrics_completed.csv",
-            "notes": "Wave 6A.0 validates evidence hygiene only; Gate D0 has not yet decided paper claim strength.",
+            "notes": "Wave 6A+ supplies deterministic mechanism evidence; Gate D0 still decides paper claim strength.",
         },
         {
             "claim": "positive_rcmv_case_exists",
@@ -1009,10 +1727,40 @@ def _write_paper_claim_support_table(
             "notes": "unique_state_hash_count must be 1 for each scenario/seed comparison group.",
         },
         {
+            "claim": "raw_gap_illusion_diagnosis",
+            "support_status": _status_to_claim(status_by_group.get("S2", "")),
+            "evidence_file": "scenario_mechanism_summary.csv",
+            "notes": "S2 should show raw gap can be misleading once reachability/safety/recoverability are applied.",
+        },
+        {
+            "claim": "boundary_speed_production_action_effectiveness",
+            "support_status": _status_to_claim(production_status if production_status == "clear_support" else s6_productive_status),
+            "evidence_file": "S6_productive_aggregate_metrics.csv",
+            "notes": "Requires selected_action_type != none, selected_RCMV > 0, improved predicted inventory, and non-degraded realized demand denominator.",
+        },
+        {
+            "claim": "rd_recoverability_useful",
+            "support_status": _status_to_claim(rd_status),
+            "evidence_file": "ablation_comparison_summary.csv",
+            "notes": "S6 distinguishes RD/recoverability contrast from demand service improvement.",
+        },
+        {
+            "claim": "action_conditioned_reservation_useful",
+            "support_status": _status_to_claim(stale_status),
+            "evidence_file": "ablation_comparison_summary.csv",
+            "notes": "S7 checks full RPMI-CMV against stale/no-action inventory reservation.",
+        },
+        {
+            "claim": "near_miss_screening_useful",
+            "support_status": _status_to_claim(screening_status),
+            "evidence_file": "rcmv_trace_top_actions.csv",
+            "notes": "S8 checks candidate reduction without losing positive RCMV opportunity.",
+        },
+        {
             "claim": "lane_change_rolling_stochastic",
             "support_status": "not_evaluated",
             "evidence_file": "",
-            "notes": "Forbidden in Wave 6A.0; keep as limitation/future work until later gates.",
+            "notes": "Forbidden in Wave 6A+; keep as limitation/future work until later gates.",
         },
     ]
     _write_csv(path, rows, ["claim", "support_status", "evidence_file", "notes"])
@@ -1029,6 +1777,7 @@ def _write_evidence_index(
 ) -> Path:
     scenarios = sorted({str(_read_metrics(Path(run_dir)).get("scenario_id", "")) for run_dir in run_dirs})
     algorithms = sorted({str(_read_metrics(Path(run_dir)).get("algorithm_id", "")) for run_dir in run_dirs})
+    mechanism_rows = _scenario_mechanism_rows(_filter_run_dirs_by_status(run_dirs, "completed"))
     payload = {
         "batch_id": batch_id,
         "evidence_package_version": EVIDENCE_PACKAGE_VERSION,
@@ -1053,6 +1802,21 @@ def _write_evidence_index(
             "state_hash_fairness": "main_batch/state_hash_fairness.csv",
             "reservation_denominator": "main_batch/aggregate_metrics_completed.csv",
             "demand_denominator": "main_batch/aggregate_metrics_completed.csv",
+            "scenario_manifest": "main_batch/scenario_manifest.csv",
+            "scenario_mechanism_summary": "gate_D0_input/scenario_mechanism_summary.csv",
+            "baseline_comparison_summary": "gate_D0_input/baseline_comparison_summary.csv",
+            "ablation_comparison_summary": "gate_D0_input/ablation_comparison_summary.csv",
+            "rcmv_trace_top_actions": "gate_D0_input/rcmv_trace_top_actions.csv",
+            "sensitivity_local_summary": "gate_D0_input/sensitivity_local_summary.csv",
+            "failure_trace_samples": "gate_D0_input/failure_trace_samples/failure_trace_samples.csv",
+            "trace_replay_summaries": "gate_D0_input/trace_replay_summaries/trace_replay_summaries.csv",
+            "s6_productive_manifest": "gate_D0_input/S6_productive_manifest.json",
+            "s6_productive_aggregate_metrics": "gate_D0_input/S6_productive_aggregate_metrics.csv",
+            "positive_rcmv_micro_dir": "gate_D0_input/positive_rcmv_micro/",
+        },
+        "mechanism_status": {
+            str(row.get("scenario_id", "")): row.get("mechanism_interpretability_status", "")
+            for row in mechanism_rows
         },
         "answers": {
             "reservation_denominator_file": "main_batch/aggregate_metrics_completed.csv",
@@ -1108,6 +1872,27 @@ def _denominator_policy() -> dict[str, str]:
     }
 
 
+def _status_to_claim(status: str) -> str:
+    if status == "clear_support":
+        return "supported"
+    if status == "partial_support":
+        return "partial_support"
+    if status == "contradicts_claim":
+        return "contradicts_claim"
+    return "not_supported"
+
+
+def _claim_status(statuses: Any) -> str:
+    values = list(statuses)
+    if any(value == "contradicts_claim" for value in values):
+        return "contradicts_claim"
+    if any(value == "clear_support" for value in values):
+        return "candidate_evidence"
+    if any(value == "partial_support" for value in values):
+        return "partial_support"
+    return "not_supported"
+
+
 def _read_csv(path: str | Path) -> list[dict[str, str]]:
     file_path = Path(path)
     if not file_path.exists():
@@ -1143,6 +1928,10 @@ __all__ = [
     "RCMV_TRACE_COLUMNS",
     "READINESS_SCHEMA_VERSION",
     "READINESS_SUMMARY_COLUMNS",
+    "RCMV_TRACE_TOP_ACTION_COLUMNS",
+    "SCENARIO_MANIFEST_COLUMNS",
+    "SCENARIO_MECHANISM_SUMMARY_COLUMNS",
+    "SENSITIVITY_LOCAL_SUMMARY_COLUMNS",
     "SUMMARY_COLUMNS",
     "STATE_HASH_FAIRNESS_COLUMNS",
     "aggregate_failures",
@@ -1150,6 +1939,14 @@ __all__ = [
     "aggregate_readiness",
     "build_evidence_package",
     "collect_rcmv_trace",
+    "collect_scenario_manifest",
     "generate_summary_tables",
+    "write_ablation_comparison_summary",
+    "write_baseline_comparison_summary",
+    "write_failure_trace_samples",
+    "write_rcmv_trace_top_actions",
+    "write_scenario_mechanism_summary",
+    "write_sensitivity_local_summary",
     "write_state_hash_fairness_csv",
+    "write_trace_replay_summaries",
 ]

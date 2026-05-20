@@ -375,3 +375,116 @@ def test_wave6a0_run_artifacts_include_state_hash_json(tmp_path):
 
     assert state_hash["state_hash"] == metrics["state_hash"]
     assert metrics["metrics_schema_version"] == METRICS_SCHEMA_VERSION
+
+
+def test_wave6aplus_gate_d0_input_contains_deterministic_hardening_tables(tmp_path):
+    result = run_baseline_suite(
+        [
+            make_scenario_config("S2", seed=0),
+            make_scenario_config("S5", seed=0),
+            make_scenario_config("S6", seed=0),
+            make_scenario_config("S6_productive", seed=0),
+            make_scenario_config("S7", seed=0),
+            make_scenario_config("S8", seed=0),
+        ],
+        [0],
+        [
+            "raw_gap_reservation",
+            "rpmi_cmv",
+            "rpmi_cmv_without_rd",
+            "rpmi_cmv_without_action_conditioned_reservation",
+            "rpmi_cmv_without_near_miss",
+        ],
+        tmp_path,
+        batch_id="wave6aplus_gate_d0",
+    )
+
+    gate = tmp_path / "wave6aplus_gate_d0" / "evidence_package" / "gate_D0_input"
+    required = [
+        gate / "aggregate_metrics_completed.csv",
+        gate / "aggregate_metrics_readiness_fail.csv",
+        gate / "scenario_manifest.csv",
+        gate / "scenario_mechanism_summary.csv",
+        gate / "baseline_comparison_summary.csv",
+        gate / "ablation_comparison_summary.csv",
+        gate / "rcmv_trace_top_actions.csv",
+        gate / "sensitivity_local_summary.csv",
+        gate / "failure_trace_samples" / "failure_trace_samples.csv",
+        gate / "trace_replay_summaries" / "trace_replay_summaries.csv",
+        gate / "paper_claim_support_table.csv",
+        gate / "positive_rcmv_micro" / "positive_rcmv_manifest.json",
+        gate / "positive_rcmv_micro" / "positive_rcmv_rcmv_trace.csv",
+        gate / "S6_productive_manifest.json",
+        gate / "S6_productive_aggregate_metrics.csv",
+        gate / "S6_productive_rcmv_trace.csv",
+        gate / "S6_productive_failure_summary.csv",
+    ]
+
+    assert result.gate_D0_input_path == str(gate)
+    assert all(path.exists() for path in required)
+
+
+def test_wave6aplus_scenario_manifest_and_mechanism_summary_are_auditable(tmp_path):
+    run_baseline_suite(
+        [make_scenario_config("S2", seed=0), make_scenario_config("S5", seed=0)],
+        [0],
+        ["raw_gap_reservation", "rpmi_cmv", "rpmi_cmv_without_near_miss"],
+        tmp_path,
+        batch_id="wave6aplus_manifest",
+    )
+    gate = tmp_path / "wave6aplus_manifest" / "evidence_package" / "gate_D0_input"
+    manifest_rows = read_csv(gate / "scenario_manifest.csv")
+    summary_rows = read_csv(gate / "scenario_mechanism_summary.csv")
+
+    assert {"mechanism_target", "expected_failure_mode", "expected_boundary_types"}.issubset(manifest_rows[0])
+    assert {row["scenario_id"] for row in manifest_rows} == {"S2", "S5"}
+    assert {row["scenario_id"] for row in summary_rows} == {"S2", "S5"}
+    assert all(row["mechanism_interpretability_status"] in {"clear_support", "partial_support", "inconclusive", "contradicts_claim"} for row in summary_rows)
+    assert any("Inventory-only support" in row["notes"] for row in summary_rows if row["scenario_id"] == "S5")
+
+
+def test_wave6aplus_rcmv_top_actions_sensitivity_and_replay_tables(tmp_path):
+    run_baseline_suite(
+        [make_scenario_config("S2", seed=0)],
+        [0],
+        ["rpmi_cmv", "rpmi_cmv_without_rd"],
+        tmp_path,
+        batch_id="wave6aplus_trace",
+    )
+    gate = tmp_path / "wave6aplus_trace" / "evidence_package" / "gate_D0_input"
+
+    top_rows = read_csv(gate / "rcmv_trace_top_actions.csv")
+    sensitivity_rows = read_csv(gate / "sensitivity_local_summary.csv")
+    replay_rows = read_csv(gate / "trace_replay_summaries" / "trace_replay_summaries.csv")
+
+    assert top_rows
+    assert {"best_action", "selected_action", "a0_none", "top_5_by_RCMV"}.issubset(top_rows[0])
+    assert any(row["best_selected_consistent"] == "True" for row in top_rows)
+    assert {row["parameter"] for row in sensitivity_rows} == {
+        "theta",
+        "lambda_D",
+        "lambda_C",
+        "near_miss_delta_W_max",
+        "RD_max",
+        "production_width_buffer",
+    }
+    assert replay_rows
+    assert {"predicted_valid", "realized_valid", "prediction_realization_status"}.issubset(replay_rows[0])
+
+
+def test_wave6aplus_s6_productive_and_positive_rcmv_are_formal_gate_inputs(tmp_path):
+    run_baseline_suite(
+        [make_scenario_config("S6_productive", seed=0)],
+        [0],
+        ["raw_gap_reservation", "rpmi_cmv"],
+        tmp_path,
+        batch_id="wave6aplus_s6_productive",
+    )
+    gate = tmp_path / "wave6aplus_s6_productive" / "evidence_package" / "gate_D0_input"
+    manifest = json.loads((gate / "S6_productive_manifest.json").read_text(encoding="utf-8"))
+    aggregate_rows = read_csv(gate / "S6_productive_aggregate_metrics.csv")
+    positive_manifest = json.loads((gate / "positive_rcmv_micro" / "positive_rcmv_manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["case_count"] == 2
+    assert any(row["algorithm_id"] == "rpmi_cmv" and row["selected_action_type"] != "none" and float(row["selected_RCMV"]) > 0.0 for row in aggregate_rows)
+    assert positive_manifest["positive_rcmv_case_count"] >= 1
