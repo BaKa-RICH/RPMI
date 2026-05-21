@@ -17,9 +17,12 @@ class SimConfig:
     H: float = 12.0
     dt_merge: float = 0.5
     total_time: float = 30.0
-    decision_mode: Literal["single_t0_micro_episode", "rolling"] = (
-        "single_t0_micro_episode"
-    )
+    decision_mode: Literal[
+        "single_t0_micro_episode",
+        "rolling",
+        "rolling_horizon_episode",
+    ] = "single_t0_micro_episode"
+    decision_interval: float = 1.0
     target_lane: int = 0
     ramp_lane: int = -1
 
@@ -35,6 +38,9 @@ class AlgorithmConfig:
     theta: float = 0.05
     top_k_actions: int = 8
     T_prod: float = 3.0
+    switching_cost: float = 0.05
+    hysteresis_threshold: float = 0.05
+    active_guidance_lock_time: float = 1.0
     conflict_mode: Literal[
         "time_window_default", "whole_horizon_debug", "slot_only_debug"
     ] = "time_window_default"
@@ -78,7 +84,6 @@ DISALLOWED_V0_FLAGS = {
     "mobil": "MOBIL lane-change behavior is not part of deterministic Python V0.",
     "action_bundle": "Action bundle logic is forbidden before later phases.",
     "learning": "Learning/RL is outside deterministic Python V0.",
-    "rolling_reservation": "Rolling reservation is reserved for Phase 6B.",
 }
 
 
@@ -126,7 +131,7 @@ def load_config(path: str | Path) -> RunConfig:
 
 
 def validate_v0_flags(config: RunConfig) -> None:
-    """Reject features explicitly forbidden for deterministic Python V0 Wave 0."""
+    """Reject features explicitly forbidden for the active deterministic V0 stage."""
 
     enabled: list[str] = []
     for name in DISALLOWED_V0_FLAGS:
@@ -135,10 +140,25 @@ def validate_v0_flags(config: RunConfig) -> None:
     if enabled:
         joined = "; ".join(enabled)
         raise FeatureFlagError(f"Forbidden V0 feature flag(s) enabled: {joined}")
-    if config.sim.decision_mode != "single_t0_micro_episode":
+    if config.sim.decision_mode == "rolling":
         raise FeatureFlagError(
             "Phase 0 locks decision_mode to single_t0_micro_episode; "
             f"got {config.sim.decision_mode!r}."
+        )
+    if config.sim.decision_mode == "rolling_horizon_episode":
+        if not config.flags.rolling_reservation:
+            raise FeatureFlagError(
+                "rolling_horizon_episode requires rolling_reservation=True."
+            )
+        return
+    if config.flags.rolling_reservation:
+        raise FeatureFlagError(
+            "rolling_reservation=True requires decision_mode='rolling_horizon_episode'."
+        )
+    if config.sim.decision_mode != "single_t0_micro_episode":
+        raise FeatureFlagError(
+            "Unsupported decision_mode for deterministic Python V0: "
+            f"{config.sim.decision_mode!r}."
         )
 
 
