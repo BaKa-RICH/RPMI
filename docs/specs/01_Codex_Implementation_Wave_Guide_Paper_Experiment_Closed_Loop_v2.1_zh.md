@@ -152,11 +152,11 @@ failure trace 样例
 | Wave 6A+ | Wave 6A.0 | S2/S5/S6/S7/S8 deterministic evidence | lane-change/rolling/stochastic |
 | Gate D0 | Wave 6A+ | evidence decision/report | 新功能 |
 | Wave 7 | Gate D0 pass 或 conditional pass | lane-change production | rolling/stochastic |
-| Gate D1 | Wave 7 | lane-change claim decision | 新功能 |
-| Wave 8 | Gate D1 pass 或 paper decision allows | rolling reservation | stochastic |
-| Gate D2 | Wave 8 | rolling claim decision | 新功能 |
-| Wave 9 | Gate D2 pass 或 paper decision allows | stochastic IDM V1 | SUMO/MOBIL/RL |
-| Gate D3 | Wave 9 | robustness claim decision | 新功能 |
+| Gate D1 | Wave 7 | lane-change current evidence claim decision | 新功能 |
+| Wave 8 | Gate D1 decision recorded 且 paper decision allows | rolling reservation | stochastic |
+| Gate D2 | Wave 8 | rolling current evidence claim decision | 新功能 |
+| Wave 9 | Gate D2 decision recorded 且 paper decision allows | stochastic IDM V1 | SUMO/MOBIL/RL |
+| Gate D3 | Wave 9 | robustness current evidence claim decision | 新功能 |
 
 ## 5. 论文--实验闭环
 
@@ -168,6 +168,28 @@ Q2. 实验数据支持什么论文主张？
 Q3. 哪些论文主张必须降级、删除或改为未来工作？
 Q4. 下一阶段是补证据、改代码，还是改论文？
 ```
+
+Q3 只约束“截至当前 Gate 的阶段性结果写法”。它不是对完整论文目标的永久删除令。若某一 claim 属于后续 Wave/Gate 的验证对象，应标记为 `pending_later_wave_validation`，而不是解释为理论无效。
+
+## 5.1 Claim staging semantics
+
+每个论文 claim 必须处于以下状态之一：
+
+```text
+framework_proposal：
+  论文稿中的完整方法框架组成部分，可以保留为研究目标，但不等于当前实验已验证。
+
+current_evidence_supported：
+  已由当前阶段 evidence package 支持，可以写成当前阶段实验结论。
+
+pending_later_wave_validation：
+  属于后续 Wave/Gate 的验证目标，可以写成计划、方法组成或待验证项，不能写成当前已验证结果。
+
+unsupported_or_contradicted：
+  当前 evidence 不支持或反驳，必须修正实现、证据或当前阶段 claim 表述。
+```
+
+Codex 不得把“当前 Gate 未验证后续模块”误读为“论文稿必须删除后续模块”。Gate 只决定当前 evidence version 的写法边界。
 
 ## 6. 实验证据层级
 
@@ -248,10 +270,10 @@ failure_join_key
 
 | Gate | 决策问题 | 可能结果 |
 |---|---|---|
-| D0 | boundary-speed V0 是否足以支撑论文主机制？ | pass / conditional pass / fail |
-| D1 | lane-change production 是否可作为论文主张？ | retain / downgrade / remove |
-| D2 | rolling reservation 是否可作为论文主张？ | retain / downgrade / remove |
-| D3 | stochastic robustness 是否可作为论文主张？ | retain / downgrade / remove |
+| D0 | 截至 Wave 6A+/Gate D0，boundary-speed deterministic single-t0 V0 是否足以支撑当前阶段 mechanism-level evidence claim？ | pass / conditional pass / fail |
+| D1 | Wave 7 evidence 是否足以把 lane-change production 写成当前已验证或有限支持主张？ | retain / downgrade / remove |
+| D2 | Wave 8 evidence 是否足以把 rolling reservation 写成当前已验证或有限支持主张？ | retain / downgrade / remove |
+| D3 | Wave 9 evidence 是否足以把 stochastic robustness 写成当前已验证或有限支持主张？ | retain / downgrade / remove |
 
 ## 9. 论文主张边界
 
@@ -261,19 +283,19 @@ failure_join_key
 在 deterministic single-t0 micro-episode 中，RPMI-CMV 的 near-miss screening、RCMV action selection 与 action-conditioned reservation 能改善 recoverable supply/deficit，并暴露 raw-gap/density/speed baseline 的局限。
 ```
 
-### D1 通过后可新增
+### D1 retain 后可新增
 
 ```text
 完整 action set 中，lane-change production 可以扩展 boundary-speed 无法覆盖的 near-miss opportunity。
 ```
 
-### D2 通过后可新增
+### D2 retain 后可新增
 
 ```text
 rolling horizon reservation 在多周期决策中保持 reservation consistency，并降低 stale/expired/failure 风险。
 ```
 
-### D3 通过后可新增
+### D3 retain 后可新增
 
 ```text
 在 HDV heterogeneity 与 bounded stochastic IDM 扰动下，RPMI-CMV 的 recoverability-based decision 具有鲁棒性。

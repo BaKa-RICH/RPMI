@@ -93,6 +93,8 @@ D0 决定 boundary-speed V0 的主机制是否站得住。
 
 ## 3. 每阶段人类要看什么
 
+本节里的“保留 / 降级 / future work”都只表示当前 evidence version 的论文写法边界，不等于删除 `docs/paper/第3.1版论文稿.md` 中的完整研究目标。
+
 ### Wave 6A.0
 
 你要看：
@@ -168,7 +170,7 @@ lane-change 是否真的带来 boundary-speed 不能带来的收益？
 如果没有：
 
 ```text
-论文不要强行保留 lane-change 主张。
+不要把 lane-change 写成当前已验证主张；可写成 framework proposal、pending validation 或 limitation。
 ```
 
 ### Wave 8 / Gate D2
@@ -182,7 +184,7 @@ rolling 是否解决 stale/expiration/multi-period consistency？
 如果只是复杂但无收益：
 
 ```text
-写成 future work。
+在当前 evidence version 写成 pending validation / future work。
 ```
 
 ### Wave 9 / Gate D3

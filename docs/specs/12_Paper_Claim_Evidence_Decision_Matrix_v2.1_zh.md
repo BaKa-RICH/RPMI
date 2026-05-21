@@ -47,6 +47,11 @@ RPMI-CMV 显著提高合流成功率
 ## 1. 主张状态
 
 ```text
+framework_proposal：完整论文稿中的方法框架组成部分，可以保留为研究目标，不等于当前已验证。
+current_evidence_supported：当前阶段 evidence package 已支持，可写成当前阶段实验结论。
+pending_later_wave_validation：后续 Wave/Gate 的验证目标，可以写成计划或待验证项，不能写成当前已验证。
+unsupported_or_contradicted：当前 evidence 不支持或反驳，必须修正实现、证据或当前阶段 claim。
+
 supported：证据充分，可写为主结论
 qualified_supported：有限条件下支持，必须写清边界
 inconclusive：证据不清，不写主结论
@@ -54,28 +59,30 @@ contradicted：证据反驳，必须删改
 future_work：未实现或未验证，只能写未来工作
 ```
 
+`future_work` 在本矩阵中表示“对当前 evidence version 是 future/pending”，不是放弃该研究目标。
+
 ## 2. 主张矩阵
 
-| Claim ID | 论文主张 | 所需证据 | Gate | 通过后写法 | 未通过写法 |
-|---|---|---|---|---|---|
-| C0 | raw gap count 不等于 ramp-specific recoverable inventory | S2/S6 raw-gap illusion + P_R/RD/matching trace | D0 | raw gap is insufficient | limitation/example only |
-| C1 | time-expanded edge inventory 可解释 merge difficulty | S0/S2/S6 predictor/outcome 或 diagnostic summary | D0 | inventory-based metrics explain difficulty | preliminary diagnostic |
-| C2 | near-miss screening 能定位可生产机会 | S5/S8 near_miss + candidate/action trace | D0 | near-miss screening identifies actionable opportunities | future refinement |
-| C3 | boundary-speed production 可改善 slot availability | S5/S6_productive positive non-none RCMV + delta_S/delta_Z + demand denominator | D0 | boundary-speed V0 supports production mechanism | not supported / inventory-only |
-| C3a | RPMI-CMV 可利用已有 recoverable inventory 且抑制不必要动作 | selected_action_type=none + selected_Z_R下降/为0 + negative action RCMV | D0 | inventory reservation and no-unnecessary-action behavior supported | not supported |
-| C4 | RCMV 能选择合理 action | RCMV trace top actions + selected J decrease + positive_rcmv_micro package | D0 | RCMV selects beneficial actions under audited conditions | objective/execution gap needs revision |
-| C5 | RD/recoverability 有独立贡献 | without_rd ablation difference | D0 | RD improves action/reservation quality | RD proxy limitation |
-| C6 | action-conditioned reservation 必要 | stale ablation harm | D0 | action-conditioned reservation avoids stale plans | future work/weak evidence |
-| C7 | lane-change production 是有效 action mode | full vs boundary/lane_change evidence | D1 | LC expands action space | future work |
-| C8 | rolling horizon reservation 改善多周期一致性 | rolling vs single evidence | D2 | rolling improves consistency | future work |
-| C9 | stochastic IDM 下鲁棒 | P_R_hat/noise/p_min sensitivity | D3 | robust under bounded stochasticity | future work |
-| C10 | 完整 RPMI-CMV 已复现 | D0+D1+D2+D3 全部 retain/pass | D3 | full mechanism implemented and validated | 不得声称 |
+| Claim ID | claim_status | 论文主张 | 所需证据 | Gate | 通过后写法 | 当前未通过/未验证写法 |
+|---|---|---|---|---|---|---|
+| C0 | current_evidence_supported | raw gap count 不等于 ramp-specific recoverable inventory | S2/S6 raw-gap illusion + P_R/RD/matching trace | D0 | raw gap is insufficient | limitation/example only |
+| C1 | current_evidence_supported 或 qualified_supported | time-expanded edge inventory 可解释 merge difficulty | S0/S2/S6 predictor/outcome 或 diagnostic summary | D0 | inventory-based metrics explain difficulty | preliminary diagnostic |
+| C2 | qualified_supported | near-miss screening 能定位候选机会 | S5/S8 near_miss + candidate/action trace | D0 | near-miss screening has screening/diagnostic value | pending production validation |
+| C3 | pending_later_wave_validation | boundary-speed production 可改善 realized slot/service | S5/S6_productive positive non-none RCMV + realized-valid demand denominator | D0/D1 | boundary-speed production supports realized mechanism | not supported / inventory-only / requires realized-valid evidence |
+| C3a | current_evidence_supported | RPMI-CMV 可利用已有 recoverable inventory 且抑制不必要动作 | selected_action_type=none + selected_Z_R下降/为0 + negative action RCMV | D0 | inventory reservation and no-unnecessary-action behavior supported | not supported |
+| C4 | qualified_supported | RCMV 能选择合理 action | RCMV trace top actions + selected J decrease + positive_rcmv_micro package | D0 | RCMV selects/ranks actions under audited conditions | objective/execution gap needs revision |
+| C5 | pending_later_wave_validation；当前仅 diagnostic support | RD/recoverability 有独立贡献并改善服务 | without_rd ablation difference + demand/service improvement | D0+later gates | RD improves action/reservation quality and service | RD diagnostic support only / service improvement pending |
+| C6 | pending_later_wave_validation；当前可写 ablation contrast | action-conditioned reservation 必要 | stale ablation harm + realized service consistency | D0/D2 | action-conditioned reservation avoids stale plans | weak evidence / rolling validation pending |
+| C7 | pending_later_wave_validation | lane-change production 是有效 action mode | full vs boundary/lane_change evidence | D1 | LC expands action space | planned validation / not evaluated by D0 |
+| C8 | pending_later_wave_validation | rolling horizon reservation 改善多周期一致性 | rolling vs single/stale/no-commitment evidence + demand lifecycle + slot-consumption conflict + per-context action-conditioned recomputation + plan commitment + full trace join + demand denominator + plan stability metrics | D2 | rolling improves reservation consistency under evolving traffic states, with audited demand lifecycle, conflict-aware slot consumption, and plan-commitment stability | rolling lifecycle may be implemented, but current evidence does not validate it as a closed-loop, benefit-improving, stable control mechanism |
+| C9 | pending_later_wave_validation | stochastic IDM 下鲁棒 | P_R_hat/noise/p_min sensitivity | D3 | robust under bounded stochasticity | planned validation / not evaluated by D0 |
+| C10 | requires D0+D1+D2+D3 | 完整 RPMI-CMV 已复现 | D0+D1+D2+D3 全部 retain/pass | D3 | full mechanism implemented and validated | 不得声称 |
 
 ## 3. 写作规则
 
 ### D0 pass 但 D1/D2/D3 未做
 
-论文标题和摘要应避免：
+若写的是仅含 D0 证据的阶段性论文版本，标题和摘要应避免把以下内容写成“当前已验证”：
 
 ```text
 full RPMI-CMV
@@ -89,6 +96,8 @@ stochastic robustness
 ```text
 a deterministic boundary-speed V0 mechanism validation of RPMI-CMV
 ```
+
+若这些内容属于完整 3.1 论文稿的框架目标或后续实验计划，可以保留为 `framework_proposal` 或 `pending_later_wave_validation`，但不能写成当前 D0 evidence 已验证。
 
 ### D1 未通过
 
@@ -104,7 +113,7 @@ lane-change production is validated
 lane-change production is an extension left for future work
 ```
 
-### D2 未通过
+### D2 downgrade
 
 不要写：
 
@@ -115,7 +124,21 @@ rolling reservation is validated
 可写：
 
 ```text
-the present experiments use single-t0 micro-episodes
+rolling lifecycle is implemented and auditable, but current evidence does not yet validate realized service/control improvement.
+```
+
+### D2 remove
+
+不要写：
+
+```text
+rolling reservation is validated
+```
+
+可写：
+
+```text
+the present validated evidence remains single-t0; rolling reservation remains pending_later_wave_validation.
 ```
 
 ### D3 未通过

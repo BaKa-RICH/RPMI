@@ -1,8 +1,8 @@
-"""Boundary-speed RCMV action selection for Phase 5A.
+"""RCMV production action selection for deterministic Python V0.
 
-Wave 5A deliberately implements only single boundary-speed actions.  Lane
-change, action bundles, rolling horizon, and fallback repair remain outside
-this module.
+Wave 7 extends the previous single boundary-speed action set with a deterministic
+lane-change proxy.  Action bundles, rolling horizon, MOBIL, SUMO, stochastic IDM,
+and fallback repair remain outside this module.
 """
 
 from __future__ import annotations
@@ -33,15 +33,15 @@ from rpmi.slots import (
     compute_edge_qualities,
     generate_slots,
 )
-from rpmi.state import TrafficState
+from rpmi.state import TrafficState, VehicleState
 
 
-ActionType = Literal["none", "front_acc", "rear_dec", "front_rear"]
+ActionType = Literal["none", "front_acc", "rear_dec", "front_rear", "lane_change"]
 
 
 @dataclass(frozen=True)
 class ActionConfig:
-    """Phase 5A action-selection parameters."""
+    """Single-decision action-selection parameters."""
 
     H: float = 1.0
     dt: float = 0.5
@@ -68,6 +68,37 @@ class ActionConfig:
     near_miss_RD_max: float = 1.0
     action_mode: str = "additive_clip"
     event_min_gap: float = 0.0
+    lanes: int = 2
+    enable_boundary_speed: bool = True
+    enable_lane_change: bool = False
+    lc_duration: float = 1.0
+    lc_min_front_margin: float = 3.0
+    lc_min_rear_margin: float = 3.0
+    lc_base_cost: float = 0.05
+    lc_duration_penalty_weight: float = 0.02
+    lc_margin_risk_weight: float = 0.10
+    lc_disturbance_weight: float = 0.05
+    lc_allow_exceed_T_prod: bool = False
+    lc_mode: str = "discrete_switch_at_end"
+    lc_upstream_search_distance: float = 80.0
+
+
+@dataclass(frozen=True)
+class LaneChangeCandidate:
+    candidate_id: str
+    edge_id: str
+    cav_id: int
+    from_lane: int
+    to_lane: int
+    start_time: float
+    end_time: float
+    expected_gap_effect: str
+    receiving_gap_front_id: int | None
+    receiving_gap_rear_id: int | None
+    feasibility_pass: bool
+    reject_reason: str
+    feasibility_margin_front: float = -math.inf
+    feasibility_margin_rear: float = -math.inf
 
 
 @dataclass(frozen=True)
@@ -120,7 +151,7 @@ class ActionEvaluation:
     matched_count: int = 0
     invalid_count: int = 0
     rank: int = 0
-    cost_components: dict[str, float] | None = None
+    cost_components: dict[str, Any] | None = None
     matched_rd_sum: float = 0.0
     matching_result: MatchingResult | None = None
     slots: tuple[Slot, ...] = ()
@@ -156,14 +187,35 @@ def find_near_miss_edges(
         label = classify_near_miss(
             quality,
             boundary_type,
-            {
-                "near_miss_delta_W_max": values.near_miss_delta_W_max,
-                "near_miss_RD_max": values.near_miss_RD_max,
-            },
+            values,
         )
-        if not label.is_near_miss:
+        modes = list(label.available_modes)
+        lc_candidate_exists = values.enable_lane_change and (
+            label.is_near_miss or label.reason == "no_boundary_cav_mode"
+        )
+        if lc_candidate_exists and lane_change_control_cav_for_edge(None, edge, state, values) is not None:
+            if "lane_change" not in modes:
+                modes.append("lane_change")
+        if not modes:
             continue
-        near_misses.append(_near_miss_from_label(label, quality, edge, boundary_type))
+        reason = label.reason
+        if "lane_change" in modes and not label.available_modes:
+            reason = "lc_upstream_blocking;lc_can_reorder_boundary"
+        near_misses.append(
+            _near_miss_from_label(
+                NearMissLabel(
+                    is_near_miss=True,
+                    near_miss_type=label.near_miss_type,
+                    delta_W_req=label.delta_W_req,
+                    available_modes=tuple(modes),
+                    screen_score=label.screen_score,
+                    reason=reason,
+                ),
+                quality,
+                edge,
+                boundary_type,
+            )
+        )
     return near_misses
 
 
@@ -197,11 +249,50 @@ def generate_candidate_actions(
         )
     ]
     index = 0
+    lane_change_index = 0
     for near_miss in near_misses:
         edge = edge_map.get(near_miss.edge_id)
         if edge is None:
             continue
         for mode in near_miss.available_modes:
+            if mode == "lane_change":
+                if not values.enable_lane_change:
+                    continue
+                candidate = build_lane_change_candidate(
+                    near_miss,
+                    edge,
+                    state,
+                    values,
+                    lane_change_index,
+                )
+                lane_change_index += 1
+                if candidate is None:
+                    continue
+                profile = build_lane_change_profile(candidate, values)
+                action = Action(
+                    action_id=make_action_id("lane_change", lane_change_index - 1),
+                    action_type="lane_change",
+                    nominal_edge_id=edge.edge_id,
+                    controlled_cavs=(candidate.cav_id,),
+                    target_gap_id=(
+                        None
+                        if candidate.receiving_gap_front_id is None
+                        or candidate.receiving_gap_rear_id is None
+                        else (
+                            candidate.receiving_gap_front_id,
+                            candidate.receiving_gap_rear_id,
+                        )
+                    ),
+                    control_profile=profile,
+                    estimated_cost=compute_lane_change_cost(profile, values)["C_bar"],
+                    boundary_type=near_miss.boundary_type,
+                    rejected_before_rollout=not candidate.feasibility_pass,
+                    reject_reason=candidate.reject_reason,
+                )
+                actions.append(action)
+                continue
+            if not values.enable_boundary_speed:
+                continue
             if mode not in {"front_acc", "rear_dec", "front_rear"}:
                 continue
             controlled = controlled_cavs_for_mode(mode, edge, state)
@@ -237,6 +328,262 @@ def generate_candidate_actions(
                 )
                 index += 1
     return actions
+
+
+def find_lane_change_candidates(
+    near_misses: Sequence[NearMissEdge],
+    edge_map: Mapping[str, Edge],
+    state: TrafficState,
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+) -> list[LaneChangeCandidate]:
+    """Build auditable lane-change feasibility candidates for logging/tests."""
+
+    values = coerce_action_config(params)
+    candidates = []
+    for index, near_miss in enumerate(near_misses):
+        if "lane_change" not in near_miss.available_modes:
+            continue
+        edge = edge_map.get(near_miss.edge_id)
+        if edge is None:
+            continue
+        candidate = build_lane_change_candidate(near_miss, edge, state, values, index)
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+def build_lane_change_candidate(
+    near_miss: NearMissEdge,
+    edge: Edge,
+    state: TrafficState,
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+    index: int = 0,
+) -> LaneChangeCandidate | None:
+    """Return one deterministic upstream-CAV lane-change feasibility record."""
+
+    values = coerce_action_config(params)
+    if not values.enable_lane_change:
+        return None
+    start_time = state.time
+    duration = max(float(values.lc_duration), values.dt)
+    end_time = start_time + duration
+    candidates = lane_change_control_cavs_for_edge(near_miss, edge, state, values)
+    if not candidates:
+        return None
+
+    rejected: LaneChangeCandidate | None = None
+    for cav in candidates:
+        to_lane = _receiving_lane_for_cav(cav, values)
+        front, rear, margin_front, margin_rear = receiving_gap_for_vehicle(
+            state,
+            cav,
+            to_lane,
+        )
+        feasibility_pass, reject_reason = validate_lane_change_candidate_fields(
+            cav,
+            to_lane,
+            front,
+            rear,
+            margin_front,
+            margin_rear,
+            duration,
+            values,
+        )
+        candidate = LaneChangeCandidate(
+            candidate_id=f"lc_{index}_{near_miss.edge_id}",
+            edge_id=near_miss.edge_id,
+            cav_id=cav.id,
+            from_lane=cav.lane,
+            to_lane=to_lane,
+            start_time=start_time,
+            end_time=end_time,
+            expected_gap_effect="move_target_lane_cav_to_inner_lane_reorder_boundary",
+            receiving_gap_front_id=None if front is None else front.id,
+            receiving_gap_rear_id=None if rear is None else rear.id,
+            feasibility_pass=feasibility_pass,
+            reject_reason=reject_reason,
+            feasibility_margin_front=margin_front,
+            feasibility_margin_rear=margin_rear,
+        )
+        if feasibility_pass:
+            return candidate
+        if rejected is None:
+            rejected = candidate
+    return rejected
+
+
+def build_lane_change_profile(
+    candidate: LaneChangeCandidate,
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+) -> dict[str, Any]:
+    values = coerce_action_config(params)
+    duration = max(candidate.end_time - candidate.start_time, 0.0)
+    profile = {
+        "mode": "lane_change",
+        "action_profile_feasible": candidate.feasibility_pass,
+        "lane_change_candidate_id": candidate.candidate_id,
+        "lc_from_lane": candidate.from_lane,
+        "lc_to_lane": candidate.to_lane,
+        "lc_start_time": candidate.start_time,
+        "lc_end_time": candidate.end_time,
+        "lc_duration": duration,
+        "receiving_gap_id": _receiving_gap_id(
+            candidate.receiving_gap_front_id,
+            candidate.receiving_gap_rear_id,
+        ),
+        "receiving_gap_front_id": candidate.receiving_gap_front_id,
+        "receiving_gap_rear_id": candidate.receiving_gap_rear_id,
+        "lc_feasibility_margin_front": candidate.feasibility_margin_front,
+        "lc_feasibility_margin_rear": candidate.feasibility_margin_rear,
+        "lc_feasibility_pass": candidate.feasibility_pass,
+        "lc_reject_reason": candidate.reject_reason,
+        "lc_mode": values.lc_mode,
+        "lc_expected_gap_effect": candidate.expected_gap_effect,
+    }
+    profile.update(compute_lane_change_cost(profile, values))
+    return profile
+
+
+def receiving_gap_for_vehicle(
+    state: TrafficState,
+    cav: VehicleState,
+    to_lane: int,
+) -> tuple[VehicleState | None, VehicleState | None, float, float]:
+    """Find the receiving-lane gap around the CAV's current longitudinal x."""
+
+    receiving = [
+        vehicle
+        for vehicle in state.vehicles.values()
+        if vehicle.active and vehicle.lane == to_lane and vehicle.id != cav.id
+    ]
+    front = min((vehicle for vehicle in receiving if vehicle.x > cav.x), key=lambda item: item.x, default=None)
+    rear = max((vehicle for vehicle in receiving if vehicle.x < cav.x), key=lambda item: item.x, default=None)
+    if front is None or rear is None:
+        return front, rear, -math.inf, -math.inf
+    margin_front = front.x - front.length - cav.x
+    margin_rear = cav.x - cav.length - rear.x
+    return front, rear, margin_front, margin_rear
+
+
+def lane_change_control_cav_for_edge(
+    near_miss: NearMissEdge | None,
+    edge: Edge,
+    state: TrafficState,
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+) -> VehicleState | None:
+    """Select one outer/target-lane CAV that can be moved inward by the LC proxy."""
+
+    candidates = lane_change_control_cavs_for_edge(near_miss, edge, state, params)
+    return None if not candidates else candidates[0]
+
+
+def lane_change_control_cavs_for_edge(
+    near_miss: NearMissEdge | None,
+    edge: Edge,
+    state: TrafficState,
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+) -> list[VehicleState]:
+    """Return deterministic target-lane CAV choices for Wave 7 lane-change production.
+
+    In this V0 lane numbering, ``target_lane`` is the outer mainline lane next to
+    the ramp and ``target_lane + 1`` is the receiving inner mainline lane.  Wave 7
+    only supports moving a controlled CAV out of the target lane into that inner
+    lane; it does not model adjacent-lane insertion into the target lane.
+    """
+
+    del near_miss
+    values = coerce_action_config(params)
+    front = state.vehicles.get(edge.front_id)
+    rear = state.vehicles.get(edge.rear_id)
+    if front is None or rear is None:
+        return []
+    search_low = rear.x - values.lc_upstream_search_distance
+    search_high = front.x
+    candidates = [
+        vehicle
+        for vehicle in state.vehicles.values()
+        if vehicle.active
+        and vehicle.role == "mainline"
+        and vehicle.veh_type == "CAV"
+        and vehicle.lane == values.target_lane
+        and search_low <= vehicle.x <= search_high
+    ]
+    return sorted(candidates, key=lambda item: (-item.x, item.id))
+
+
+def validate_lane_change_candidate_fields(
+    cav: VehicleState,
+    to_lane: int,
+    front: VehicleState | None,
+    rear: VehicleState | None,
+    margin_front: float,
+    margin_rear: float,
+    duration: float,
+    params: ActionConfig,
+) -> tuple[bool, str]:
+    if cav.veh_type != "CAV":
+        return False, "controlled_vehicle_not_cav"
+    if cav.lane != params.target_lane:
+        return False, "controlled_vehicle_not_in_target_lane"
+    if to_lane < 0 or to_lane >= params.lanes:
+        return False, "receiving_lane_missing"
+    if to_lane != params.target_lane + 1:
+        return False, "unsupported_lane_change_direction"
+    if front is None or rear is None:
+        return False, "receiving_gap_missing"
+    if margin_front < params.lc_min_front_margin:
+        return False, "front_margin_insufficient"
+    if margin_rear < params.lc_min_rear_margin:
+        return False, "rear_margin_insufficient"
+    if duration > params.T_prod and not params.lc_allow_exceed_T_prod:
+        return False, "duration_exceeds_T_prod"
+    return True, ""
+
+
+def _receiving_lane_for_cav(cav: VehicleState, values: ActionConfig) -> int:
+    del cav
+    return values.target_lane + 1
+
+
+def _receiving_gap_id(front_id: int | None, rear_id: int | None) -> str:
+    if front_id is None or rear_id is None:
+        return ""
+    return f"{front_id}-{rear_id}"
+
+
+def compute_lane_change_cost(
+    profile: Mapping[str, Any],
+    params: ActionConfig | Mapping[str, Any] | Any | None = None,
+) -> dict[str, float]:
+    values = coerce_action_config(params)
+    duration = float(profile.get("lc_duration", values.lc_duration))
+    front_margin = float(profile.get("lc_feasibility_margin_front", -math.inf))
+    rear_margin = float(profile.get("lc_feasibility_margin_rear", -math.inf))
+    duration_penalty = values.lc_duration_penalty_weight * max(duration, 0.0)
+    margin_front_short = max(values.lc_min_front_margin - front_margin, 0.0)
+    margin_rear_short = max(values.lc_min_rear_margin - rear_margin, 0.0)
+    margin_risk = values.lc_margin_risk_weight * (margin_front_short + margin_rear_short)
+    disturbance = 0.0
+    if bool(profile.get("lc_feasibility_pass", False)):
+        disturbance = values.lc_disturbance_weight
+    C_bar = values.lc_base_cost + duration_penalty + margin_risk + disturbance
+    return {
+        "lc_base_cost": values.lc_base_cost,
+        "lc_duration_penalty": duration_penalty,
+        "lc_margin_risk_penalty": margin_risk,
+        "lc_disturbance_proxy": disturbance,
+        "lc_cost": C_bar,
+        "C_bar": C_bar,
+    }
+
+
+def lane_change_trace_fields(profile: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "lane_change_candidate_id": profile.get("lane_change_candidate_id", ""),
+        "lc_feasibility_margin_front": profile.get("lc_feasibility_margin_front", ""),
+        "lc_feasibility_margin_rear": profile.get("lc_feasibility_margin_rear", ""),
+        "lc_expected_gap_effect": profile.get("lc_expected_gap_effect", ""),
+    }
 
 
 def build_boundary_speed_profile(
@@ -369,6 +716,13 @@ def evaluate_action(
 
     values = coerce_action_config(params)
     if action.rejected_before_rollout:
+        invalid_cost = {"invalid_action": 1.0}
+        if action.action_type == "lane_change":
+            invalid_cost = {
+                **invalid_cost,
+                **compute_lane_change_cost(action.control_profile, values),
+                **lane_change_trace_fields(action.control_profile),
+            }
         return ActionEvaluation(
             action_id=action.action_id,
             J=math.inf,
@@ -382,7 +736,7 @@ def evaluate_action(
             matched_edge_ids=[],
             selected=False,
             rejected_by_theta=True,
-            cost_components={"invalid_action": 1.0},
+            cost_components=invalid_cost,
         )
 
     rollout = action_conditioned_rollout(action, state, values)
@@ -394,6 +748,8 @@ def evaluate_action(
     )
     matched_rd_sum = compute_matched_recovery_debt(matching, qualities)
     cost = compute_production_cost(action, rollout, values)
+    if action.action_type == "lane_change":
+        cost = {**cost, **lane_change_trace_fields(action.control_profile)}
     objective = compute_objective(
         matching.Z_R,
         matching.D_H,
@@ -511,6 +867,8 @@ def compute_production_cost(
     values = coerce_action_config(params)
     if action.action_type == "none":
         return {"effort": 0.0, "disturbance": 0.0, "C_bar": 0.0}
+    if action.action_type == "lane_change":
+        return compute_lane_change_cost(action.control_profile, values)
     profile = action.control_profile
     u_front = abs(float(profile.get("u_front", 0.0)))
     u_rear = abs(float(profile.get("u_rear", 0.0)))
@@ -620,6 +978,22 @@ def commands_for_action(
     if action.action_type == "none" or not action.controlled_cavs:
         return {}
     profile = action.control_profile
+    if action.action_type == "lane_change":
+        vehicle_id = action.controlled_cavs[0]
+        start = float(profile.get("lc_start_time", 0.0))
+        end = float(profile.get("lc_end_time", start))
+        if current_time < start - 1e-9 or current_time > end + 1e-9:
+            return {}
+        command: dict[str, Any] = {
+            "action_id": action.action_id,
+            "lane_change": True,
+            "lc_from_lane": profile.get("lc_from_lane"),
+            "lc_to_lane": profile.get("lc_to_lane"),
+            "lc_start_time": start,
+            "lc_end_time": end,
+            "lc_mode": profile.get("lc_mode", values.lc_mode),
+        }
+        return {vehicle_id: command}
     T_prod = float(profile.get("T_prod", values.T_prod))
     if current_time - 0.0 >= T_prod - 1e-9:
         return {}
@@ -683,6 +1057,15 @@ def action_to_row(
     log_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = action.control_profile
+    lc_components = {
+        key: profile.get(key, 0.0)
+        for key in (
+            "lc_base_cost",
+            "lc_duration_penalty",
+            "lc_margin_risk_penalty",
+            "lc_disturbance_proxy",
+        )
+    }
     row = {
         "action_id": action.action_id,
         "action_type": action.action_type,
@@ -703,6 +1086,16 @@ def action_to_row(
         "estimated_cost": action.estimated_cost,
         "rejected_before_rollout": action.rejected_before_rollout,
         "reject_reason": action.reject_reason,
+        "lc_from_lane": profile.get("lc_from_lane", ""),
+        "lc_to_lane": profile.get("lc_to_lane", ""),
+        "lc_start_time": profile.get("lc_start_time", ""),
+        "lc_end_time": profile.get("lc_end_time", ""),
+        "lc_duration": profile.get("lc_duration", ""),
+        "receiving_gap_id": profile.get("receiving_gap_id", ""),
+        "lc_feasibility_pass": profile.get("lc_feasibility_pass", ""),
+        "lc_reject_reason": profile.get("lc_reject_reason", ""),
+        "lc_cost_components_json": _json_dumps_strict(lc_components),
+        "lc_mode": profile.get("lc_mode", ""),
     }
     return {**dict(log_context or {}), **row}
 
@@ -711,6 +1104,7 @@ def action_evaluation_to_row(
     evaluation: ActionEvaluation,
     log_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cost = evaluation.cost_components or {}
     row = {
         "action_id": evaluation.action_id,
         "J": evaluation.J,
@@ -726,14 +1120,34 @@ def action_evaluation_to_row(
         "selected": evaluation.selected,
         "rank": evaluation.rank,
         "rejected_by_theta": evaluation.rejected_by_theta,
-        "cost_components_json": json.dumps(
-            evaluation.cost_components or {},
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
+        "cost_components_json": _json_dumps_strict(evaluation.cost_components or {}),
         "matched_rd_sum": evaluation.matched_rd_sum,
+        "lane_change_candidate_id": cost.get("lane_change_candidate_id", ""),
+        "lc_cost": cost.get("lc_cost", cost.get("C_bar", "")),
+        "lc_feasibility_margin_front": cost.get("lc_feasibility_margin_front", ""),
+        "lc_feasibility_margin_rear": cost.get("lc_feasibility_margin_rear", ""),
+        "lc_expected_gap_effect": cost.get("lc_expected_gap_effect", ""),
     }
     return {**dict(log_context or {}), **row}
+
+
+def _json_dumps_strict(payload: Any) -> str:
+    return json.dumps(
+        _json_safe(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def coerce_action_config(config: ActionConfig | Mapping[str, Any] | Any | None = None) -> ActionConfig:
@@ -808,6 +1222,19 @@ def coerce_action_config(config: ActionConfig | Mapping[str, Any] | Any | None =
         "near_miss_RD_max": _config_value(config, "near_miss_RD_max", 1.0),
         "action_mode": _config_value(config, "action_mode", "additive_clip"),
         "event_min_gap": _config_value(config, "event_min_gap", 0.0),
+        "lanes": _config_value(config, "lanes", _nested_config_value(config, "road", "lanes", 2)),
+        "enable_boundary_speed": _config_value(config, "enable_boundary_speed", True),
+        "enable_lane_change": _config_value(config, "enable_lane_change", False),
+        "lc_duration": _config_value(config, "lc_duration", _config_value(config, "T_prod", 1.0)),
+        "lc_min_front_margin": _config_value(config, "lc_min_front_margin", 3.0),
+        "lc_min_rear_margin": _config_value(config, "lc_min_rear_margin", 3.0),
+        "lc_base_cost": _config_value(config, "lc_base_cost", 0.05),
+        "lc_duration_penalty_weight": _config_value(config, "lc_duration_penalty_weight", 0.02),
+        "lc_margin_risk_weight": _config_value(config, "lc_margin_risk_weight", 0.10),
+        "lc_disturbance_weight": _config_value(config, "lc_disturbance_weight", 0.05),
+        "lc_allow_exceed_T_prod": _config_value(config, "lc_allow_exceed_T_prod", False),
+        "lc_mode": _config_value(config, "lc_mode", "discrete_switch_at_end"),
+        "lc_upstream_search_distance": _config_value(config, "lc_upstream_search_distance", 80.0),
     }
     return ActionConfig(**data)
 
@@ -962,6 +1389,7 @@ __all__ = [
     "ActionConfig",
     "ActionEvaluation",
     "ActionSelectionResult",
+    "LaneChangeCandidate",
     "NearMissEdge",
     "ablation_without_action_conditioned_reservation",
     "action_conditioned_rollout",
@@ -969,8 +1397,11 @@ __all__ = [
     "action_to_row",
     "boundary_type_for_edge",
     "build_boundary_speed_profile",
+    "build_lane_change_candidate",
+    "build_lane_change_profile",
     "coerce_action_config",
     "commands_for_action",
+    "compute_lane_change_cost",
     "compute_matched_recovery_debt",
     "compute_objective",
     "compute_production_cost",
@@ -978,10 +1409,16 @@ __all__ = [
     "edge_metadata",
     "evaluate_action",
     "evaluate_rollout_inventory",
+    "find_lane_change_candidates",
     "find_near_miss_edges",
     "generate_candidate_actions",
+    "lane_change_control_cav_for_edge",
+    "lane_change_control_cavs_for_edge",
+    "lane_change_trace_fields",
+    "receiving_gap_for_vehicle",
     "run_action_selection",
     "select_action",
     "slot_inventory_params",
+    "validate_lane_change_candidate_fields",
     "validate_single_action",
 ]

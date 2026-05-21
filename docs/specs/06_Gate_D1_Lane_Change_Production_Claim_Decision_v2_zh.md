@@ -5,8 +5,12 @@
 Gate D1 判断：
 
 ```text
-论文是否保留 lane-change production 作为主张？
+截至 Wave 7/Gate D1，lane-change production 是否可写成当前已验证或有限支持主张？
 ```
+
+Gate D1 只裁决 Wave 7 evidence package 对 lane-change production claim 的支持强度。它不否定 `docs/paper/第3.1版论文稿.md` 作为完整研究目标草稿，也不裁决 Wave 8 rolling reservation 或 Wave 9 stochastic robustness 的最终有效性。
+
+若 D1 结果是 `remove/future_work`，只表示当前 evidence version 不能把 lane-change production 写成已验证结论；若该目标仍属于后续研究计划，应标记为 `pending_later_wave_validation` 或 `future_work`，不是永久删稿令。
 
 它不实现新功能。
 
@@ -46,6 +50,8 @@ trace 能解释 LC 如何改变 boundary sequence 或 receiving slot
 
 ## 4. 判定
 
+以下判定只约束当前 evidence version 的论文写法。
+
 ### RETAIN
 
 论文可写：
@@ -64,10 +70,10 @@ lane-change production is implemented and observed in selected cases, but main e
 
 ### REMOVE / FUTURE WORK
 
-论文写为：
+当前 evidence version 写为：
 
 ```text
-lane-change production remains future work.
+lane-change production is not validated in this evidence version and remains pending_later_wave_validation/future work.
 ```
 
 ## 5. 输出
@@ -84,6 +90,7 @@ JSON:
 {
   "gate": "D1",
   "decision": "retain|downgrade|remove",
+  "claim_status": "current_evidence_supported|qualified_supported|pending_later_wave_validation|unsupported_or_contradicted",
   "allowed_next_stage": "Wave 8|Wave 7 fix|paper revision only",
   "supported_claims": [],
   "downgraded_claims": [],
@@ -99,5 +106,5 @@ JSON:
 ```text
 reservation lifecycle 在 single-t0 下稳定
 failure trace 可回溯
-论文已明确 lane-change 主张边界
+论文已明确 lane-change 在当前 evidence version 的主张边界
 ```

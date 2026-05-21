@@ -144,6 +144,16 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "estimated_cost",
         "rejected_before_rollout",
         "reject_reason",
+        "lc_from_lane",
+        "lc_to_lane",
+        "lc_start_time",
+        "lc_end_time",
+        "lc_duration",
+        "receiving_gap_id",
+        "lc_feasibility_pass",
+        "lc_reject_reason",
+        "lc_cost_components_json",
+        "lc_mode",
     ],
     "action_evaluations.csv": SHARED_COLUMNS
     + [
@@ -163,6 +173,11 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "rejected_by_theta",
         "cost_components_json",
         "matched_rd_sum",
+        "lane_change_candidate_id",
+        "lc_cost",
+        "lc_feasibility_margin_front",
+        "lc_feasibility_margin_rear",
+        "lc_expected_gap_effect",
     ],
     "matching.csv": SHARED_COLUMNS
     + [

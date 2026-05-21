@@ -16,9 +16,12 @@ def test_v0_feature_lock_accepts_phase0_defaults():
     validate_v0_flags(RunConfig())
 
 
+def test_wave7_feature_lock_accepts_lane_change_production_flag():
+    validate_v0_flags(RunConfig(flags=FeatureFlags(lane_change_production=True)))
+
+
 def test_v0_feature_lock_blocks_rolling_decision_mode():
     config = RunConfig(sim=SimConfig(decision_mode="rolling"))
 
     with pytest.raises(FeatureFlagError, match="single_t0_micro_episode"):
         validate_v0_flags(config)
-

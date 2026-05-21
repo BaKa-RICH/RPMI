@@ -78,7 +78,6 @@ DISALLOWED_V0_FLAGS = {
     "mobil": "MOBIL lane-change behavior is not part of deterministic Python V0.",
     "action_bundle": "Action bundle logic is forbidden before later phases.",
     "learning": "Learning/RL is outside deterministic Python V0.",
-    "lane_change_production": "Lane-change production is reserved for Phase 5B.",
     "rolling_reservation": "Rolling reservation is reserved for Phase 6B.",
 }
 

@@ -89,13 +89,14 @@ rpmi_v0/docs/specs/
   03_Patch_Wave_6Aplus_Deterministic_Evidence_Hardening_v2.1_zh.md
   04_Gate_D0_Boundary_Speed_V0_Main_Mechanism_Decision_v2.1_zh.md
   05_Wave_7_Lane_Change_Production_and_S5_Evidence_Spec_v2.1_zh.md
-  06_Gate_D1_Lane_Change_Production_Claim_Decision_v2.1_zh.md
-  07_Wave_8_Rolling_Horizon_Reservation_and_D2_Evidence_Spec_v2.1_zh.md
-  08_Gate_D2_Rolling_Reservation_Claim_Decision_v2.1_zh.md
-  09_Wave_9_Stochastic_IDM_V1_and_D3_Robustness_Spec_v2.1_zh.md
-  10_Gate_D3_Stochastic_Robustness_Claim_Decision_v2.1_zh.md
+  06_Gate_D1_Lane_Change_Production_Claim_Decision_v2_zh.md
+  07_Wave_8_Rolling_Horizon_Reservation_and_D2_Evidence_Spec_v2_zh.md
+  08_Gate_D2_Rolling_Reservation_Claim_Decision_v2_zh.md
+  09_Wave_9_Stochastic_IDM_V1_and_D3_Robustness_Spec_v2_zh.md
+  10_Gate_D3_Stochastic_Robustness_Claim_Decision_v2_zh.md
   11_Human_Readable_Paper_Experiment_Closed_Loop_Roadmap_v2.1_zh.md
   12_Paper_Claim_Evidence_Decision_Matrix_v2.1_zh.md
+  13_Claim_Staging_and_Gate_Interpretation_Guardrail_v2.1_zh.md
 ```
 
 不要同时保留旧 Phase specs 作为活跃文件。
@@ -132,19 +133,19 @@ Wave 6A.0 Patch：证据包卫生与指标补丁
 ↓
 Wave 6A+ Patch：确定性证据强化，覆盖 S2/S5/S6/S7/S8
 ↓
-Gate D0：判断 boundary-speed V0 是否足以支撑论文主机制
+Gate D0：判断截至 Wave 6A+/D0 的 boundary-speed deterministic V0 是否足以支撑当前阶段 mechanism-level evidence claim
 ↓
 Wave 7：实现 lane-change production，并做 S5 完整动作集证据
 ↓
-Gate D1：决定论文是否保留 lane-change production 主张
+Gate D1：判断 Wave 7 evidence 是否足以把 lane-change production 写成当前已验证或有限支持主张
 ↓
 Wave 8：实现 rolling horizon reservation，并做多周期证据
 ↓
-Gate D2：决定论文是否保留 rolling reservation 主张
+Gate D2：判断 Wave 8 evidence 是否足以把 rolling horizon reservation 写成当前已验证或有限支持主张
 ↓
 Wave 9：实现 stochastic IDM V1，并做鲁棒性证据
 ↓
-Gate D3：决定论文是否保留 stochastic robustness 主张
+Gate D3：判断 Wave 9 evidence 是否足以把 stochastic robustness 写成当前已验证或有限支持主张
 ↓
 论文实验章定稿：只写 evidence package 支持的主张
 ```
@@ -152,6 +153,20 @@ Gate D3：决定论文是否保留 stochastic robustness 主张
 ## 5. 论文写作硬约束
 
 论文只能写已经被 evidence package 支持的主张。
+
+## 5.1 阶段性证据解释红线
+
+`docs/paper/第3.1版论文稿.md` 可以作为完整研究目标草稿保留；Wave specs 是把论文稿拆成可复现实验计划；Gate decision 只裁决当前阶段 evidence package 对当前阶段 claim 的支持强度。
+
+当前 Gate 未验证某一 claim，不等于后续实验无效。若该 claim 属于后续 Wave/Gate，应标记为：
+
+```text
+pending_later_wave_validation
+planned validation
+not yet evaluated by this Gate
+```
+
+禁止把后续 Wave 的 planned validation 写成当前已验证结论；也禁止因为当前阶段尚未实现后续 Wave，就要求删除论文目标中的后续模块。
 
 如果某一 Gate 未通过，对应论文主张只能写成：
 
@@ -173,13 +188,14 @@ not evaluated in this version
 | 03 Wave 6A+ | 加强 deterministic scenario evidence |
 | 04 Gate D0 | 决定 boundary-speed V0 主机制是否可写进论文 |
 | 05 Wave 7 | 实现 lane-change production |
-| 06 Gate D1 | 决定是否保留 lane-change 主张 |
+| 06 Gate D1 | 裁决 lane-change 主张在当前 evidence version 的状态 |
 | 07 Wave 8 | 实现 rolling horizon reservation |
-| 08 Gate D2 | 决定是否保留 rolling 主张 |
+| 08 Gate D2 | 裁决 rolling 主张在当前 evidence version 的状态 |
 | 09 Wave 9 | 实现 stochastic IDM V1 |
-| 10 Gate D3 | 决定是否保留 stochastic robustness 主张 |
+| 10 Gate D3 | 裁决 stochastic robustness 主张在当前 evidence version 的状态 |
 | 11 人类路线图 | 给研究者判断阶段合理性 |
 | 12 主张矩阵 | 将论文 claims 与 evidence/gates 绑定 |
+| 13 Claim staging guardrail | 区分完整论文目标、当前阶段证据和后续验证目标 |
 
 ## 7. 最重要的一句话
 

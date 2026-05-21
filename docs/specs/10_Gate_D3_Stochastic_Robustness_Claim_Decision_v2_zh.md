@@ -5,8 +5,12 @@
 Gate D3 判断：
 
 ```text
-论文是否保留 stochastic robustness 主张？
+截至 Wave 9/Gate D3，stochastic robustness 是否可写成当前已验证或有限支持主张？
 ```
+
+Gate D3 只裁决 Wave 9 evidence package 对 stochastic robustness claim 的支持强度。它不否定 `docs/paper/第3.1版论文稿.md` 作为完整研究目标草稿，也不要求删除未被当前 evidence version 验证的框架组成部分。
+
+若 D3 结果是 `remove/future_work`，只表示当前 evidence version 不能把 stochastic robustness 写成已验证结论；若该目标仍属于后续研究计划，应标记为 `pending_later_wave_validation` 或 `future_work`，不是永久删稿令。
 
 它不实现新功能。
 
@@ -48,6 +52,8 @@ stochastic 不与 deterministic 主链条矛盾
 
 ## 4. 判定
 
+以下判定只约束当前 evidence version 的论文写法。
+
 ### RETAIN
 
 论文可写：
@@ -66,10 +72,10 @@ Stochastic tests are provided as preliminary robustness checks.
 
 ### REMOVE / FUTURE WORK
 
-论文写为：
+当前 evidence version 写为：
 
 ```text
-Stochastic robustness remains future work.
+Stochastic robustness is not validated in this evidence version and remains pending_later_wave_validation/future work.
 ```
 
 ## 5. 输出
@@ -86,6 +92,7 @@ JSON:
 {
   "gate": "D3",
   "decision": "retain|downgrade|remove",
+  "claim_status": "current_evidence_supported|qualified_supported|pending_later_wave_validation|unsupported_or_contradicted",
   "allowed_next_stage": "paper finalization|Wave 9 fix|paper revision only",
   "supported_claims": [],
   "downgraded_claims": [],

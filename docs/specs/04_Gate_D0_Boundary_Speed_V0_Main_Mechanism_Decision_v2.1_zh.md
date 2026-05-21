@@ -47,8 +47,10 @@ Gate D0 是第一个论文主张决策门。
 它只回答：
 
 ```text
-当前 boundary-speed deterministic single-t0 V0 是否足以支撑论文主机制？
+截至 Wave 6A+/Gate D0，当前 boundary-speed deterministic single-t0 V0 是否足以支撑当前阶段 mechanism-level evidence claim？
 ```
+
+Gate D0 不否定 `docs/paper/第3.1版论文稿.md` 作为完整研究目标草稿，也不裁决 Wave 7 lane-change、Wave 8 rolling reservation、Wave 9 stochastic robustness 的最终有效性。后续模块若尚未被 D0 验证，应标记为 `pending_later_wave_validation`，而不是从论文目标中删除。
 
 ## 1. Codex 执行合约
 
@@ -204,10 +206,10 @@ RCMV trace 符号和选择逻辑可解释
 论文可写：
 
 ```text
-deterministic single-t0 boundary-speed V0 支持 RPMI-CMV 主机制验证。
+deterministic single-t0 boundary-speed V0 支持 mechanism-level V0 evidence。
 ```
 
-但若没有 positive non-none RCMV production case，只能写 mechanism-level inventory/reservation/avoidance evidence，不得写 production action effectiveness。
+PASS 不允许提前声称 Wave 7/8/9 尚未验证的内容。若没有 realized-valid positive non-none RCMV production case，只能写 mechanism-level inventory/reservation/avoidance evidence，不得写 production action effectiveness。
 
 可进入：
 
@@ -228,10 +230,10 @@ S5 支持，但 S6/S7/S8 中有 1--2 组 inconclusive
 论文可写：
 
 ```text
-boundary-speed V0 provides preliminary/mechanism-level evidence。
+boundary-speed V0 provides preliminary/mechanism-level staged evidence。
 ```
 
-进入 Wave 7 前必须先完成 D0_fixlist。
+CONDITIONAL PASS 表示当前 V0 evidence 可支撑谨慎阶段性 claim。D0_fixlist 是阶段性 claim hygiene / evidence hygiene，不是最终论文删稿令；完成后可继续 Wave 7 验证更强 claim。
 
 ### FAIL
 
@@ -247,7 +249,7 @@ baseline fairness 不通过
 ```
 
 不得进入 Wave 7。  
-必须先修 Wave 6A.0/6A+ 或修改论文主张。
+必须先修 Wave 6A.0/6A+ 或修改当前阶段 claim。FAIL 不等于后续 Wave 永久无效，只表示 D0 阶段 evidence package 不足以支撑 D0 阶段机制 claim。
 
 ## 6. 输出文件
 

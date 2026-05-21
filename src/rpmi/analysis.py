@@ -96,12 +96,18 @@ AGGREGATE_METRIC_COLUMNS = [
     "uses_rd",
     "uses_near_miss",
     "production_mode",
+    "action_set_mode",
     "action_conditioned_reservation",
     "baseline_uses_proposed_information",
     "ablation_without_rd",
     "ablation_without_rcmv",
     "ablation_without_action_conditioned_reservation",
     "ablation_no_near_miss_screening",
+    "lane_change_candidate_count",
+    "lane_change_feasible_count",
+    "lane_change_selected_count",
+    "lane_change_success_count",
+    "lane_change_induced_failure_count",
 ]
 
 
@@ -166,6 +172,11 @@ RCMV_TRACE_COLUMNS = [
     "rejected_by_theta",
     "cost_components_json",
     "matched_rd_sum",
+    "lane_change_candidate_id",
+    "lc_cost",
+    "lc_feasibility_margin_front",
+    "lc_feasibility_margin_rear",
+    "lc_expected_gap_effect",
 ]
 
 
@@ -368,6 +379,43 @@ GATE_D0_DENOMINATOR_COLUMNS = [
 ]
 
 
+WAVE7_S5_ACTION_SUMMARY_COLUMNS = [
+    "scenario_id",
+    "seed",
+    "algorithm_id",
+    "action_set_mode",
+    "selected_action_type",
+    "selected_RCMV",
+    "baseline_J",
+    "selected_J",
+    "baseline_S_R",
+    "selected_S_R",
+    "baseline_Z_R",
+    "selected_Z_R",
+    "lane_change_candidate_count",
+    "lane_change_feasible_count",
+    "lane_change_selected_count",
+    "lane_change_success_count",
+    "lane_change_induced_failure_count",
+    "failed_reservation_count",
+    "generated_reservation_count",
+    "failed_reservation_rate",
+    "failed_reservation_denominator",
+    "merge_success_count",
+    "merge_success_rate_over_demand",
+    "predicted_unserved_demand_count",
+    "predicted_unserved_demand_rate",
+    "realized_unserved_demand_count",
+    "realized_unserved_demand_rate",
+    "production_cost_sum",
+    "full_vs_boundary_delta_Z_R",
+    "full_vs_boundary_delta_S_R",
+    "full_vs_boundary_delta_J",
+    "full_vs_boundary_delta_failure_rate",
+    "full_vs_boundary_delta_cost",
+]
+
+
 def aggregate_metrics(
     run_dirs: Sequence[str | Path],
     output_path: str | Path | None = None,
@@ -464,6 +512,11 @@ def collect_rcmv_trace(
                     "rejected_by_theta": row.get("rejected_by_theta", ""),
                     "cost_components_json": row.get("cost_components_json", ""),
                     "matched_rd_sum": row.get("matched_rd_sum", ""),
+                    "lane_change_candidate_id": row.get("lane_change_candidate_id", ""),
+                    "lc_cost": row.get("lc_cost", ""),
+                    "lc_feasibility_margin_front": row.get("lc_feasibility_margin_front", ""),
+                    "lc_feasibility_margin_rear": row.get("lc_feasibility_margin_rear", ""),
+                    "lc_expected_gap_effect": row.get("lc_expected_gap_effect", ""),
                 }
             )
     _write_csv(out_path, rows, RCMV_TRACE_COLUMNS)
@@ -1028,6 +1081,286 @@ def build_evidence_package(
     )
     paths["schema_manifest"] = _write_schema_manifest(root / "schema_manifest.json")
     return paths
+
+
+def build_wave7_evidence_package(
+    run_dirs: Sequence[str | Path],
+    *,
+    package_dir: str | Path,
+    batch_id: str,
+    fairness: Mapping[str, Any] | None = None,
+    batch_manifest_path: str | Path | None = None,
+) -> dict[str, Path]:
+    """Create Wave 7 lane-change/S5 evidence without executing Gate D1."""
+
+    paths = build_evidence_package(
+        run_dirs,
+        package_dir=package_dir,
+        batch_id=batch_id,
+        fairness=fairness,
+        batch_manifest_path=batch_manifest_path,
+    )
+    root = Path(package_dir)
+    gate_dir = root / "gate_D1_input"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    completed_dirs = _filter_run_dirs_by_status(run_dirs, "completed")
+    summary_path = root / "wave_7_s5_full_action_summary.csv"
+    paths["wave_7_s5_full_action_summary"] = write_wave7_s5_full_action_summary(
+        completed_dirs,
+        summary_path,
+    )
+    trace_dir = root / "wave_7_lane_change_trace_samples"
+    paths["wave_7_lane_change_actions"] = _collect_filtered_raw_csv(
+        completed_dirs,
+        "actions.csv",
+        trace_dir / "lane_change_actions.csv",
+        lambda row: row.get("action_type") == "lane_change",
+    )
+    paths["wave_7_lane_change_rcmv_trace"] = _copy_lane_change_trace_rows(
+        completed_dirs,
+        trace_dir / "lane_change_rcmv_trace.csv",
+    )
+    paths["wave_7_lane_change_events"] = _collect_filtered_raw_csv(
+        completed_dirs,
+        "realized_events.csv",
+        trace_dir / "lane_change_realized_events.csv",
+        lambda row: str(row.get("event_type", "")).startswith("lane_change")
+        or str(row.get("linked_action_id", "")).startswith("act_lane_change"),
+    )
+    paths["wave_7_actions"] = _collect_filtered_raw_csv(
+        completed_dirs,
+        "actions.csv",
+        root / "wave_7_actions.csv",
+        lambda row: True,
+    )
+    paths["wave_7_realized_events"] = _collect_filtered_raw_csv(
+        completed_dirs,
+        "realized_events.csv",
+        root / "wave_7_realized_events.csv",
+        lambda row: True,
+    )
+    paths["wave_7_report"] = _write_wave7_report(
+        root / "wave_7_report.md",
+        summary_path,
+        trace_dir,
+        completed_dirs=completed_dirs,
+    )
+    paths["gate_D1_manifest"] = _write_gate_d1_manifest(
+        gate_dir / "gate_D1_manifest.json",
+        batch_id=batch_id,
+        summary_path=summary_path,
+    )
+    _copy_file(paths["wave_7_s5_full_action_summary"], gate_dir / "wave_7_s5_full_action_summary.csv")
+    _copy_file(paths["rcmv_trace"], gate_dir / "rcmv_trace.csv")
+    _copy_file(paths["failure_summary_main_batch"], gate_dir / "failure_summary.csv")
+    _copy_file(paths["state_hash_fairness"], gate_dir / "state_hash_fairness.csv")
+    _copy_file(paths["wave_7_actions"], gate_dir / "actions.csv")
+    _copy_file(paths["wave_7_realized_events"], gate_dir / "realized_events.csv")
+    gate_trace_dir = gate_dir / "lane_change_trace_samples"
+    gate_trace_dir.mkdir(parents=True, exist_ok=True)
+    _copy_file(paths["wave_7_lane_change_actions"], gate_trace_dir / "lane_change_actions.csv")
+    _copy_file(paths["wave_7_lane_change_rcmv_trace"], gate_trace_dir / "lane_change_rcmv_trace.csv")
+    _copy_file(paths["wave_7_lane_change_events"], gate_trace_dir / "lane_change_realized_events.csv")
+    paths["gate_D1_input"] = gate_dir
+    return paths
+
+
+def write_wave7_s5_full_action_summary(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    rows = [_metrics_row(run_dir) for run_dir in run_dirs if _read_metrics(Path(run_dir)).get("scenario_id") == "S5"]
+    boundary_by_seed = {
+        str(row.get("seed", "")): row
+        for row in rows
+        if row.get("algorithm_id") in {"rpmi_cmv_boundary_speed_only", "rpmi_cmv"}
+        and row.get("action_set_mode", "") == "boundary_speed_only"
+    }
+    out = []
+    for row in rows:
+        boundary = boundary_by_seed.get(str(row.get("seed", "")), {})
+        out.append(
+            {
+                **{column: row.get(column, "") for column in WAVE7_S5_ACTION_SUMMARY_COLUMNS},
+                "full_vs_boundary_delta_Z_R": _float(boundary.get("selected_Z_R")) - _float(row.get("selected_Z_R")),
+                "full_vs_boundary_delta_S_R": _float(row.get("selected_S_R")) - _float(boundary.get("selected_S_R")),
+                "full_vs_boundary_delta_J": _float(boundary.get("selected_J")) - _float(row.get("selected_J")),
+                "full_vs_boundary_delta_failure_rate": _float(boundary.get("failed_reservation_rate")) - _float(row.get("failed_reservation_rate")),
+                "full_vs_boundary_delta_cost": _float(row.get("production_cost_sum")) - _float(boundary.get("production_cost_sum")),
+            }
+        )
+    _write_csv(output_path, out, WAVE7_S5_ACTION_SUMMARY_COLUMNS)
+    return Path(output_path)
+
+
+def _collect_filtered_raw_csv(
+    run_dirs: Sequence[str | Path],
+    filename: str,
+    output_path: str | Path,
+    predicate: Any,
+) -> Path:
+    rows = []
+    columns: list[str] = []
+    for run_dir in run_dirs:
+        metrics = _read_metrics(Path(run_dir))
+        for row in _read_csv(Path(run_dir) / filename):
+            if not predicate(row):
+                continue
+            merged = {**_metric_context(metrics), **row}
+            rows.append(merged)
+            for column in merged:
+                if column not in columns:
+                    columns.append(column)
+    if not columns:
+        columns = list(dict.fromkeys([*GLOBAL_EVIDENCE_COLUMNS, *CSV_LOG_SCHEMAS.get(filename, [])]))
+    _write_csv(output_path, rows, columns)
+    return Path(output_path)
+
+
+def _copy_lane_change_trace_rows(
+    run_dirs: Sequence[str | Path],
+    output_path: str | Path,
+) -> Path:
+    tmp_path = Path(output_path).with_name(f".{Path(output_path).name}.all")
+    trace_path = collect_rcmv_trace(run_dirs, tmp_path)
+    rows = [
+        row
+        for row in _read_csv(trace_path)
+        if row.get("action_type") == "lane_change"
+        or row.get("lane_change_candidate_id", "")
+    ]
+    _write_csv(output_path, rows, RCMV_TRACE_COLUMNS)
+    if tmp_path.exists():
+        tmp_path.unlink()
+    return Path(output_path)
+
+
+def _write_wave7_report(
+    path: str | Path,
+    summary_path: str | Path,
+    trace_dir: str | Path,
+    *,
+    completed_dirs: Sequence[str | Path],
+) -> Path:
+    summary_rows = _read_csv(summary_path)
+    lc_candidates = sum(int(_float(row.get("lane_change_candidate_count"))) for row in summary_rows)
+    lc_feasible = sum(int(_float(row.get("lane_change_feasible_count"))) for row in summary_rows)
+    lc_selected = sum(int(_float(row.get("lane_change_selected_count"))) for row in summary_rows)
+    lc_success = sum(int(_float(row.get("lane_change_success_count"))) for row in summary_rows)
+    lc_failures = sum(int(_float(row.get("lane_change_induced_failure_count"))) for row in summary_rows)
+    action_modes = sorted({row.get("action_set_mode", "") for row in summary_rows if row.get("action_set_mode")})
+    algorithms = sorted({row.get("algorithm_id", "") for row in summary_rows if row.get("algorithm_id")})
+    full_rows = [
+        row
+        for row in summary_rows
+        if row.get("algorithm_id") == "rpmi_cmv_full_action_set"
+        or row.get("action_set_mode") == "full_action_set"
+    ]
+    mean_full_delta_z = _mean_column(full_rows, "full_vs_boundary_delta_Z_R")
+    mean_full_delta_s = _mean_column(full_rows, "full_vs_boundary_delta_S_R")
+    mean_full_delta_j = _mean_column(full_rows, "full_vs_boundary_delta_J")
+    mean_full_delta_failure = _mean_column(full_rows, "full_vs_boundary_delta_failure_rate")
+    mean_full_delta_cost = _mean_column(full_rows, "full_vs_boundary_delta_cost")
+    denominator_complete = _rows_have_columns(
+        summary_rows,
+        [
+            "failed_reservation_rate",
+            "failed_reservation_denominator",
+            "merge_success_rate_over_demand",
+            "predicted_unserved_demand_rate",
+            "realized_unserved_demand_rate",
+        ],
+        Path(summary_path),
+    )
+    lines = [
+        "# Wave 7 Lane-Change / S5 Evidence Report",
+        "",
+        "Stage type: Wave/Patch implementation. This package prepares Gate D1 inputs but does not execute Gate D1.",
+        "",
+        "## Scope",
+        "",
+        "- Implemented lane_change as a deterministic single-CAV proxy: a controllable target-lane CAV moves from the ramp-adjacent outer mainline lane to the receiving inner mainline lane.",
+        "- The V0 proxy uses lc_mode=discrete_switch_at_end and records feasibility, cost, RCMV, and realized events.",
+        "- Rolling horizon, stochastic IDM, MOBIL, SUMO, RL, HDV autonomous lane changing, and multi-action bundles are not implemented here.",
+        "",
+        "## S5 Action Sets",
+        "",
+        f"- Completed run directories: {len(completed_dirs)}",
+        f"- Algorithms: {', '.join(algorithms)}",
+        f"- Action-set modes: {', '.join(action_modes)}",
+        f"- S5 summary: {Path(summary_path).name}",
+        f"- Lane-change trace samples: {Path(trace_dir).name}/",
+        "",
+        "## Lane-Change Counts",
+        "",
+        f"- lane_change_candidate_count: {lc_candidates}",
+        f"- lane_change_feasible_count: {lc_feasible}",
+        f"- lane_change_selected_count: {lc_selected}",
+        f"- lane_change_success_count: {lc_success}",
+        f"- lane_change_induced_failure_count: {lc_failures}",
+        "",
+        "## Full vs Boundary Mean Deltas",
+        "",
+        f"- full_vs_boundary_delta_Z_R: {mean_full_delta_z}",
+        f"- full_vs_boundary_delta_S_R: {mean_full_delta_s}",
+        f"- full_vs_boundary_delta_J: {mean_full_delta_j}",
+        f"- full_vs_boundary_delta_failure_rate: {mean_full_delta_failure}",
+        f"- full_vs_boundary_delta_cost: {mean_full_delta_cost}",
+        "",
+        "## Denominator Guardrail",
+        "",
+        f"- Required reservation and demand denominator columns present: {denominator_complete}",
+        "- failed_reservation_rate uses generated_reservation_count.",
+        "- merge_success_rate_over_demand, predicted_unserved_demand_rate, and realized_unserved_demand_rate use D_H.",
+        "- If a lane-change action only avoids invalid reservations while demand remains unserved, describe it as avoiding invalid reservations or unsafe attempts, not as improving merge success.",
+        "",
+        "## Gate D1 Input",
+        "",
+        "The gate_D1_input/ directory is an input artifact only. Gate D1 has not been run in this Wave 7 stage.",
+        "",
+    ]
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def _write_gate_d1_manifest(
+    path: str | Path,
+    *,
+    batch_id: str,
+    summary_path: str | Path,
+) -> Path:
+    payload = {
+        "gate": "D1",
+        "stage": "Wave 7",
+        "batch_id": batch_id,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "purpose": "Input package for later Gate D1 lane-change claim decision; Gate D1 is not executed by Wave 7.",
+        "decision_status": "not_run",
+        "summary_file": Path(summary_path).name,
+        "required_files": [
+            "gate_D1_manifest.json",
+            "wave_7_s5_full_action_summary.csv",
+            "rcmv_trace.csv",
+            "failure_summary.csv",
+            "state_hash_fairness.csv",
+            "actions.csv",
+            "realized_events.csv",
+            "lane_change_trace_samples/lane_change_actions.csv",
+            "lane_change_trace_samples/lane_change_rcmv_trace.csv",
+            "lane_change_trace_samples/lane_change_realized_events.csv",
+        ],
+        "denominator_policy": _denominator_policy(),
+        "forbidden_execution": [
+            "Do not execute Gate D1 in Wave 7.",
+            "Do not implement rolling reservation, stochastic robustness, MOBIL, SUMO, RL, or HDV autonomous lane changing.",
+        ],
+    }
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return out_path
 
 
 def write_gate_d0_decision(
@@ -2567,10 +2900,12 @@ __all__ = [
     "SENSITIVITY_LOCAL_SUMMARY_COLUMNS",
     "SUMMARY_COLUMNS",
     "STATE_HASH_FAIRNESS_COLUMNS",
+    "WAVE7_S5_ACTION_SUMMARY_COLUMNS",
     "aggregate_failures",
     "aggregate_metrics",
     "aggregate_readiness",
     "build_evidence_package",
+    "build_wave7_evidence_package",
     "collect_rcmv_trace",
     "collect_scenario_manifest",
     "generate_summary_tables",
@@ -2583,4 +2918,5 @@ __all__ = [
     "write_sensitivity_local_summary",
     "write_state_hash_fairness_csv",
     "write_trace_replay_summaries",
+    "write_wave7_s5_full_action_summary",
 ]

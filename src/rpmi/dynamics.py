@@ -229,6 +229,12 @@ def _command_action_id(command: Any) -> str | None:
     return None
 
 
+def _command_lane_change(command: Any) -> dict[str, Any] | None:
+    if not isinstance(command, dict) or not command.get("lane_change"):
+        return None
+    return command
+
+
 def _config_value(config: Any | None, name: str, default: Any = None) -> Any:
     if config is None:
         return default
@@ -320,6 +326,7 @@ def step_traffic(
     next_vehicles: dict[int, VehicleState] = {}
     rows: list[dict[str, Any]] = []
     action_ids_by_vehicle: dict[int, str | None] = {}
+    lane_change_events: list[dict[str, Any]] = []
 
     for vehicle_id in sorted(state.vehicles):
         vehicle = state.vehicles[vehicle_id]
@@ -329,12 +336,22 @@ def step_traffic(
         leader = find_leader(state, vehicle_id)
         a_nominal = compute_nominal_accel(vehicle, leader, config)
         command = commands.get(vehicle_id)
+        lane_change_command = _command_lane_change(command)
         a_action = _command_value(command)
         action_ids_by_vehicle[vehicle_id] = _command_action_id(command)
         a_cmd = combine_nominal_and_action(a_nominal, a_action, action_mode)
         limits = _limits_for_vehicle(vehicle, config)
         a_eff, speed_floor_clip = clip_accel_for_kinematics(vehicle.v, a_cmd, dt, limits)
         updated = step_vehicle_kinematic(vehicle, a_eff, dt, limits)
+        updated, lc_step_events = _apply_lane_change_proxy(
+            vehicle,
+            updated,
+            state.time,
+            next_time,
+            lane_change_command,
+            next_step,
+        )
+        lane_change_events.extend(lc_step_events)
         next_vehicles[vehicle_id] = updated
         rows.append(
             {
@@ -371,7 +388,7 @@ def step_traffic(
             else compute_gap_margin(leader, next_state.vehicles[vehicle_id])
         )
 
-    events = detect_overlap(next_state, min_gap=event_min_gap) + detect_hard_brake(
+    events = lane_change_events + detect_overlap(next_state, min_gap=event_min_gap) + detect_hard_brake(
         next_state,
         threshold=hard_brake_threshold,
     )
@@ -394,6 +411,60 @@ def step_traffic(
         [_with_log_context(row, log_context) for row in rows],
         [_with_log_context(event, log_context) for event in events],
     )
+
+
+def _apply_lane_change_proxy(
+    previous: VehicleState,
+    updated: VehicleState,
+    current_time: float,
+    next_time: float,
+    command: dict[str, Any] | None,
+    next_step: int,
+) -> tuple[VehicleState, list[dict[str, Any]]]:
+    if command is None:
+        return updated, []
+    action_id = _command_action_id(command)
+    from_lane = int(command.get("lc_from_lane", previous.lane))
+    to_lane = int(command.get("lc_to_lane", previous.lane))
+    start = float(command.get("lc_start_time", current_time))
+    end = float(command.get("lc_end_time", next_time))
+    events: list[dict[str, Any]] = []
+    if current_time <= start < next_time + 1e-9:
+        events.append(
+            {
+                "event_id": f"evt_{updated.id}_lane_change_started_{updated.id}_{round(start, 6)}",
+                "event_type": "lane_change_started",
+                "step": next_step,
+                "time": start,
+                "vehicle_ids": [updated.id],
+                "min_gap": None,
+                "min_margin": None,
+                "severity": 0.0,
+                "linked_reservation_id": updated.reservation_id,
+                "linked_action_id": action_id,
+                "linked_edge_id": None,
+                "note": "lc_mode=discrete_switch_at_end",
+            }
+        )
+    if current_time < end <= next_time + 1e-9 and previous.lane == from_lane:
+        updated = replace(updated, lane=to_lane)
+        events.append(
+            {
+                "event_id": f"evt_{updated.id}_lane_change_completed_{updated.id}_{round(end, 6)}",
+                "event_type": "lane_change_completed",
+                "step": next_step,
+                "time": end,
+                "vehicle_ids": [updated.id],
+                "min_gap": None,
+                "min_margin": None,
+                "severity": 0.0,
+                "linked_reservation_id": updated.reservation_id,
+                "linked_action_id": action_id,
+                "linked_edge_id": None,
+                "note": "lc_mode=discrete_switch_at_end",
+            }
+        )
+    return updated, events
 
 
 def detect_overlap(state: TrafficState, min_gap: float = 0.0) -> list[dict[str, Any]]:

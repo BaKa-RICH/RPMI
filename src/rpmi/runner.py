@@ -42,6 +42,7 @@ from rpmi.analysis import (
     aggregate_failures,
     aggregate_metrics,
     build_evidence_package,
+    build_wave7_evidence_package,
     collect_rcmv_trace,
     generate_summary_tables,
     write_state_hash_fairness_csv,
@@ -116,6 +117,7 @@ from rpmi.state import TrafficState, hash_state
 
 DecisionMode = Literal["single_t0_micro_episode"]
 ProductionMode = Literal["none", "raw_gap", "density", "speed", "rpmi"]
+ActionSetMode = Literal["boundary_speed_only", "lane_change_only", "full_action_set"]
 RunMode = Literal["mechanism", "comparison"]
 
 
@@ -130,7 +132,7 @@ class AblationConfig:
     without_rd: bool = False
     without_rcmv: bool = False
     without_action_conditioned_reservation: bool = False
-    boundary_speed_only: bool = True
+    boundary_speed_only: bool = False
     lane_change_only: bool = False
     no_near_miss_screening: bool = False
     slot_only_matching: bool = False
@@ -145,6 +147,7 @@ class BaselineConfig:
     production_mode: ProductionMode
     action_conditioned_reservation: bool
     ablations: AblationConfig = AblationConfig()
+    action_set_mode: ActionSetMode = "boundary_speed_only"
 
 
 @dataclass(frozen=True)
@@ -186,6 +189,7 @@ class BatchResult:
     evidence_package_path: str = ""
     evidence_index_path: str = ""
     gate_D0_input_path: str = ""
+    gate_D1_input_path: str = ""
 
 
 BASELINE_CONFIGS: dict[str, BaselineConfig] = {
@@ -228,6 +232,35 @@ BASELINE_CONFIGS: dict[str, BaselineConfig] = {
         uses_near_miss=True,
         production_mode="rpmi",
         action_conditioned_reservation=True,
+    ),
+    "rpmi_cmv_boundary_speed_only": BaselineConfig(
+        baseline_id="rpmi_cmv_boundary_speed_only",
+        uses_inventory=True,
+        uses_rd=True,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        ablations=AblationConfig(boundary_speed_only=True),
+        action_set_mode="boundary_speed_only",
+    ),
+    "rpmi_cmv_lane_change_only": BaselineConfig(
+        baseline_id="rpmi_cmv_lane_change_only",
+        uses_inventory=True,
+        uses_rd=True,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        ablations=AblationConfig(lane_change_only=True),
+        action_set_mode="lane_change_only",
+    ),
+    "rpmi_cmv_full_action_set": BaselineConfig(
+        baseline_id="rpmi_cmv_full_action_set",
+        uses_inventory=True,
+        uses_rd=True,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        action_set_mode="full_action_set",
     ),
     "rpmi_cmv_without_rd": BaselineConfig(
         baseline_id="rpmi_cmv_without_rd",
@@ -438,8 +471,12 @@ def run_single_t0_episode(
         coerce_action_config(config),
         log_context,
     )
+    event_rows = [
+        *_lane_change_rejection_events(decision, log_context),
+        *execution["event_rows"],
+    ]
     append_vehicle_step_rows(run_path / "vehicles_step.csv", execution["vehicle_rows"])
-    append_realized_event_rows(run_path / "realized_events.csv", execution["event_rows"])
+    append_realized_event_rows(run_path / "realized_events.csv", event_rows)
     append_reservation_rows(
         run_path / "reservations.csv",
         [reservation_to_row(item, log_context) for item in execution["reservations"]],
@@ -453,7 +490,7 @@ def run_single_t0_episode(
         decision,
         reservations,
         execution["reservations"],
-        execution["event_rows"],
+        event_rows,
         run_id=resolved_run_id,
         decision_context_id=decision_context_id,
         config_hash=str(log_context["config_hash"]),
@@ -467,7 +504,7 @@ def run_single_t0_episode(
         selected_evaluation=final_eval,
         evaluations=list(decision["evaluations"]),
         reservations=list(execution["reservations"]),
-        events=list(execution["event_rows"]),
+        events=list(event_rows),
     )
 
 
@@ -492,7 +529,11 @@ def build_decision_context(
     slots = list(diagnostic.get("slots", []))
     matching = diagnostic.get("matching")
     matching_edges = list(diagnostic.get("matching_edges", []))
-    action_params = _action_config_for_scenario(scenario_config, baseline_config.ablations)
+    action_params = _action_config_for_scenario(
+        scenario_config,
+        baseline_config.ablations,
+        baseline_config.action_set_mode,
+    )
     baseline_action = Action(
         action_id="a0_none",
         action_type="none",
@@ -758,6 +799,139 @@ def run_baseline_suite(
     )
 
 
+def run_wave7_s5_suite(
+    seeds: Sequence[int],
+    output_root: str | Path = "outputs/wave7_lane_change_validation",
+    *,
+    batch_id: str | None = None,
+) -> BatchResult:
+    """Run the Wave 7 S5 action-set comparison and assemble Gate D1 inputs.
+
+    This produces a Gate D1 input directory but deliberately does not execute
+    Gate D1.
+    """
+
+    scenario = make_scenario_config(
+        "S5",
+        seed=0,
+        road={"lanes": 2, "target_lane": 0},
+        simulation={
+            "enable_lane_change": True,
+            "u_min": 0.0,
+            "u_max": 0.0,
+            "theta": 0.0,
+            "lambda_C": 0.001,
+            "W_min_buffer": 5.0,
+            "near_miss_delta_W_max": 12.0,
+            "lc_base_cost": 0.0,
+            "lc_duration_penalty_weight": 0.0,
+            "lc_disturbance_weight": 0.0,
+        },
+        vehicles={
+            "boundary_pairs": ["HDV-CAV", "HDV-HDV"],
+            "gap_widths": [7.0, 7.0],
+            "pair_spacing": 18.0,
+            "inner_receiving_gap_count": 2,
+            "ramp_start_x": 110.0,
+            "ramp_speed": 10.0,
+            "ramp_count": 1,
+        },
+        readiness_targets={
+            "raw_gap_count_min": 0,
+            "near_miss_count_min": 1,
+            "boundary_cav_min": 0,
+            "baseline_ZR_min": 0.0,
+        },
+    )
+    baselines = [
+        "raw_gap_reservation",
+        "density_triggered",
+        "speed_benefit",
+        "rpmi_cmv_boundary_speed_only",
+        "rpmi_cmv_lane_change_only",
+        "rpmi_cmv_full_action_set",
+    ]
+    output_path = Path(output_root)
+    resolved_batch_id = batch_id or _batch_id([scenario], seeds, baselines)
+    batch_dir = output_path / resolved_batch_id
+    if batch_dir.exists():
+        shutil.rmtree(batch_dir)
+    runs_root = batch_dir / "runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    scenario_path = _materialize_scenario(scenario, batch_dir / "scenarios")
+    baseline_configs = [resolve_baseline_config(item) for item in baselines]
+    run_dirs: list[Path] = []
+    for seed in seeds:
+        for baseline in baseline_configs:
+            spec = ExperimentRunSpec(
+                scenario_config_path=str(scenario_path),
+                algorithm_id=baseline.baseline_id,
+                seed=seed,
+                output_root=runs_root,
+                run_id=_batch_run_id(
+                    resolved_batch_id,
+                    scenario.scenario_id,
+                    seed,
+                    baseline.baseline_id,
+                ),
+                batch_id=resolved_batch_id,
+                ablations=baseline.ablations,
+            )
+            run_dirs.append(run_experiment(spec))
+
+    fairness = verify_state_hash_fairness(run_dirs)
+    fairness_path = batch_dir / "state_hash_fairness.json"
+    fairness_path.write_text(
+        json.dumps(fairness, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if not fairness["fairness_pass"]:
+        raise ValueError(f"state_hash fairness failed: {fairness['mismatches']}")
+
+    manifest_path = batch_dir / "batch_manifest.csv"
+    _write_batch_manifest(manifest_path, run_dirs)
+    write_state_hash_fairness_csv(
+        fairness,
+        batch_dir / "state_hash_fairness.csv",
+        batch_id=resolved_batch_id,
+    )
+    evidence_dir = batch_dir / "evidence_package"
+    evidence_paths = build_wave7_evidence_package(
+        run_dirs,
+        package_dir=evidence_dir,
+        batch_id=resolved_batch_id,
+        fairness=fairness,
+        batch_manifest_path=manifest_path,
+    )
+    aggregate_path = evidence_paths["aggregate_metrics_completed"]
+    failure_path = evidence_paths["failure_summary_main_batch"]
+    rcmv_path = evidence_paths["rcmv_trace"]
+    tables = generate_summary_tables(
+        run_dirs,
+        batch_dir=batch_dir,
+        aggregate_metrics_path=aggregate_path,
+        failure_summary_path=failure_path,
+        rcmv_trace_path=rcmv_path,
+    )
+    return BatchResult(
+        batch_id=resolved_batch_id,
+        run_ids=[path.name for path in run_dirs],
+        run_dirs=[str(path) for path in run_dirs],
+        aggregate_metrics_path=str(aggregate_path),
+        failure_summary_path=str(failure_path),
+        rcmv_trace_path=str(rcmv_path),
+        baseline_comparison_summary_path=str(tables["baseline_comparison_summary"]),
+        ablation_comparison_summary_path=str(tables["ablation_comparison_summary"]),
+        batch_manifest_path=str(manifest_path),
+        fairness_report_path=str(fairness_path),
+        evidence_package_path=str(evidence_dir),
+        evidence_index_path=str(evidence_paths["evidence_index"]),
+        gate_D0_input_path=str(evidence_dir / "gate_D0_input"),
+        gate_D1_input_path=str(evidence_dir / "gate_D1_input"),
+    )
+
+
 def compute_episode_metrics(
     config: RunConfig,
     baseline: BaselineConfig,
@@ -846,6 +1020,7 @@ def compute_episode_metrics(
         "uses_rd": baseline.uses_rd,
         "uses_near_miss": baseline.uses_near_miss,
         "production_mode": baseline.production_mode,
+        "action_set_mode": baseline.action_set_mode,
         "action_conditioned_reservation": baseline.action_conditioned_reservation,
         "baseline_uses_proposed_information": bool(decision.get("uses_proposed_information", False))
         and baseline.production_mode != "rpmi",
@@ -913,6 +1088,11 @@ def compute_episode_metrics(
         "rd_decision_changed_flag": baseline.ablations.without_rd and selected_ids != baseline_ids,
         "raw_gap_illusion_flag": bool(selected_eval.invalid_count > 0 and baseline.production_mode == "raw_gap"),
         "selected_matched_edge_ids": list(selected_eval.matched_edge_ids),
+        "lane_change_candidate_count": lane_change_candidate_count(decision),
+        "lane_change_feasible_count": lane_change_feasible_count(decision),
+        "lane_change_selected_count": int(selected_action.action_type == "lane_change"),
+        "lane_change_success_count": lane_change_success_count(selected_action, merged),
+        "lane_change_induced_failure_count": lane_change_induced_failure_count(selected_action, events),
     }
 
 
@@ -966,6 +1146,81 @@ def execute_episode_until_horizon(
     }
 
 
+def _lane_change_rejection_events(
+    decision: Mapping[str, Any],
+    log_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    rows = []
+    for action in decision.get("actions_to_log", []):
+        if getattr(action, "action_type", "") != "lane_change":
+            continue
+        if not bool(getattr(action, "rejected_before_rollout", False)):
+            continue
+        profile = getattr(action, "control_profile", {}) or {}
+        vehicle_ids = list(getattr(action, "controlled_cavs", ()))
+        rows.append(
+            {
+                **dict(log_context),
+                "event_id": f"evt_{action.action_id}_lane_change_rejected",
+                "event_type": "lane_change_rejected",
+                "step": log_context.get("step", 0),
+                "time": profile.get("lc_start_time", log_context.get("time", 0.0)),
+                "vehicle_ids": vehicle_ids,
+                "min_gap": None,
+                "min_margin": min(
+                    _float_or_inf(profile.get("lc_feasibility_margin_front")),
+                    _float_or_inf(profile.get("lc_feasibility_margin_rear")),
+                ),
+                "severity": 0.0,
+                "linked_reservation_id": None,
+                "linked_action_id": action.action_id,
+                "linked_edge_id": getattr(action, "nominal_edge_id", None),
+                "note": getattr(action, "reject_reason", "") or profile.get("lc_reject_reason", ""),
+            }
+        )
+    return rows
+
+
+def lane_change_candidate_count(decision: Mapping[str, Any]) -> int:
+    return sum(
+        1
+        for action in decision.get("actions_to_log", [])
+        if getattr(action, "action_type", "") == "lane_change"
+    )
+
+
+def lane_change_feasible_count(decision: Mapping[str, Any]) -> int:
+    return sum(
+        1
+        for action in decision.get("actions_to_log", [])
+        if getattr(action, "action_type", "") == "lane_change"
+        and not bool(getattr(action, "rejected_before_rollout", False))
+    )
+
+
+def lane_change_success_count(
+    selected_action: Action,
+    merged_reservations: Sequence[Reservation],
+) -> int:
+    if selected_action.action_type != "lane_change":
+        return 0
+    return sum(1 for item in merged_reservations if item.status == "merged")
+
+
+def lane_change_induced_failure_count(
+    selected_action: Action,
+    events: Sequence[Mapping[str, Any]],
+) -> int:
+    if selected_action.action_type != "lane_change":
+        return 0
+    return sum(
+        1
+        for item in events
+        if item.get("event_type") in {"overlap", "negative_margin", "hard_brake", "lane_change_induced_failure"}
+        and item.get("linked_action_id") == selected_action.action_id
+    )
+
+
 def resolve_baseline_config(
     baseline: str | BaselineConfig,
     ablations: AblationConfig | None = None,
@@ -979,12 +1234,18 @@ def resolve_baseline_config(
     if ablations is None or ablations == AblationConfig():
         return base
     merged = _merge_ablations(base.ablations, ablations)
+    action_set_mode = base.action_set_mode
+    if merged.lane_change_only:
+        action_set_mode = "lane_change_only"
+    elif merged.boundary_speed_only:
+        action_set_mode = "boundary_speed_only"
     return replace(
         base,
         uses_rd=base.uses_rd and not merged.without_rd,
         action_conditioned_reservation=base.action_conditioned_reservation
         and not merged.without_action_conditioned_reservation,
         ablations=merged,
+        action_set_mode=action_set_mode,
     )
 
 
@@ -1473,6 +1734,10 @@ def _readiness_failed_metrics(
         "scenario_id": scenario.scenario_id,
         "seed": config.seed,
         "algorithm_id": config.algorithm_id,
+        "action_set_mode": BASELINE_CONFIGS.get(
+            config.algorithm_id,
+            BASELINE_CONFIGS["rpmi_cmv"],
+        ).action_set_mode,
         "batch_id": batch_id,
         "run_id": artifacts.run_id,
         "unique_run_id": artifacts.run_id,
@@ -1537,6 +1802,11 @@ def _readiness_failed_metrics(
         "action_conditioned_gain_reason": "readiness_failed",
         "rd_decision_changed_flag": False,
         "raw_gap_illusion_flag": bool(readiness.metrics.get("raw_gap_illusion_count", 0)),
+        "lane_change_candidate_count": 0,
+        "lane_change_feasible_count": 0,
+        "lane_change_selected_count": 0,
+        "lane_change_success_count": 0,
+        "lane_change_induced_failure_count": 0,
     }
 
 
@@ -1590,6 +1860,7 @@ def _run_config_for(
 def _action_config_for_scenario(
     scenario_config: ScenarioConfig,
     ablations: AblationConfig,
+    action_set_mode: ActionSetMode = "boundary_speed_only",
 ) -> ActionConfig:
     values = {
         **scenario_config.road,
@@ -1598,6 +1869,18 @@ def _action_config_for_scenario(
         **scenario_config.ramp,
     }
     values.setdefault("lambda_D", 1.0)
+    if action_set_mode == "lane_change_only" or ablations.lane_change_only:
+        values["enable_boundary_speed"] = False
+        values["enable_lane_change"] = True
+    elif action_set_mode == "full_action_set":
+        values["enable_boundary_speed"] = True
+        values["enable_lane_change"] = True
+    elif action_set_mode == "boundary_speed_only" or ablations.boundary_speed_only:
+        values["enable_boundary_speed"] = True
+        values["enable_lane_change"] = False
+    else:
+        values["enable_boundary_speed"] = True
+        values["enable_lane_change"] = bool(values.get("enable_lane_change", False))
     if ablations.without_rd:
         values["RD_max"] = 1e9
         values["lambda_D"] = 0.0
@@ -1612,7 +1895,7 @@ def _merge_ablations(left: AblationConfig, right: AblationConfig) -> AblationCon
         without_rcmv=left.without_rcmv or right.without_rcmv,
         without_action_conditioned_reservation=left.without_action_conditioned_reservation
         or right.without_action_conditioned_reservation,
-        boundary_speed_only=left.boundary_speed_only and right.boundary_speed_only,
+        boundary_speed_only=left.boundary_speed_only or right.boundary_speed_only,
         lane_change_only=left.lane_change_only or right.lane_change_only,
         no_near_miss_screening=left.no_near_miss_screening or right.no_near_miss_screening,
         slot_only_matching=left.slot_only_matching or right.slot_only_matching,
@@ -1900,6 +2183,15 @@ def _event_max_severity(events: Sequence[Mapping[str, Any]]) -> float:
     return max((float(item.get("severity", 0.0) or 0.0) for item in events), default=0.0)
 
 
+def _float_or_inf(value: Any) -> float:
+    if value in (None, ""):
+        return math.inf
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.inf
+
+
 def _bool(value: Any) -> bool:
     return bool(value)
 
@@ -1923,6 +2215,7 @@ __all__ = [
     "resolve_baseline_config",
     "run_baseline_suite",
     "run_experiment",
+    "run_wave7_s5_suite",
     "run_single_t0_episode",
     "verify_state_hash_fairness",
 ]

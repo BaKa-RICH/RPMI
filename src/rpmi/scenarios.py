@@ -390,7 +390,7 @@ def classify_near_miss(
             reason=edge_quality.fail_reason_priority,
         )
 
-    modes = _available_modes_for_boundary(boundary_type)
+    modes = _available_modes_for_boundary(boundary_type, params)
     near_type = "buffer_width" if buffer_near else "recovery_debt"
     score = 1.0 / (1.0 + max(edge_quality.delta_W_req, 0.0) + max(edge_quality.RD, 0.0))
     return NearMissLabel(
@@ -1061,14 +1061,18 @@ def _boundary_counts(slots: Sequence[Slot], state: TrafficState) -> dict[str, in
     return counts
 
 
-def _available_modes_for_boundary(boundary_type: str) -> tuple[str, ...]:
+def _available_modes_for_boundary(
+    boundary_type: str,
+    params: Mapping[str, Any] | Any | None = None,
+) -> tuple[str, ...]:
+    modes: list[str] = []
     if boundary_type == "CAV-HDV":
-        return ("front_acc",)
-    if boundary_type == "HDV-CAV":
-        return ("rear_dec",)
-    if boundary_type == "CAV-CAV":
-        return ("front_acc", "rear_dec", "front_rear")
-    return ()
+        modes.append("front_acc")
+    elif boundary_type == "HDV-CAV":
+        modes.append("rear_dec")
+    elif boundary_type == "CAV-CAV":
+        modes.extend(["front_acc", "rear_dec", "front_rear"])
+    return tuple(modes)
 
 
 def _inner_receiving_gap_count(state: TrafficState, lane: int) -> int:
