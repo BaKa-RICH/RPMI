@@ -18,6 +18,7 @@ import shutil
 from rpmi.actions import (
     Action,
     ActionConfig,
+    ActionSelectionResult,
     ActionEvaluation,
     NearMissEdge,
     action_evaluation_to_row,
@@ -131,6 +132,9 @@ class AblationConfig:
 
     without_rd: bool = False
     without_rcmv: bool = False
+    without_cbar: bool = False
+    without_theta: bool = False
+    forced_accommodation: bool = False
     without_action_conditioned_reservation: bool = False
     boundary_speed_only: bool = False
     lane_change_only: bool = False
@@ -270,6 +274,33 @@ BASELINE_CONFIGS: dict[str, BaselineConfig] = {
         production_mode="rpmi",
         action_conditioned_reservation=True,
         ablations=AblationConfig(without_rd=True),
+    ),
+    "rpmi_cmv_without_cbar": BaselineConfig(
+        baseline_id="rpmi_cmv_without_cbar",
+        uses_inventory=True,
+        uses_rd=True,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        ablations=AblationConfig(without_cbar=True),
+    ),
+    "rpmi_cmv_without_theta": BaselineConfig(
+        baseline_id="rpmi_cmv_without_theta",
+        uses_inventory=True,
+        uses_rd=True,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        ablations=AblationConfig(without_theta=True),
+    ),
+    "forced_accommodation": BaselineConfig(
+        baseline_id="forced_accommodation",
+        uses_inventory=True,
+        uses_rd=False,
+        uses_near_miss=True,
+        production_mode="rpmi",
+        action_conditioned_reservation=True,
+        ablations=AblationConfig(forced_accommodation=True),
     ),
     "rpmi_cmv_without_rcmv": BaselineConfig(
         baseline_id="rpmi_cmv_without_rcmv",
@@ -634,6 +665,12 @@ def apply_rpmi_policy(
 
     if baseline.ablations.no_near_miss_screening:
         selection = _run_rpmi_selection_without_near_miss_screening(
+            state,
+            context,
+            params,
+        )
+    elif baseline.ablations.forced_accommodation:
+        selection = _run_forced_accommodation_selection(
             state,
             context,
             params,
@@ -1026,6 +1063,9 @@ def compute_episode_metrics(
         and baseline.production_mode != "rpmi",
         "ablation_without_rd": baseline.ablations.without_rd,
         "ablation_without_rcmv": baseline.ablations.without_rcmv,
+        "ablation_without_cbar": baseline.ablations.without_cbar,
+        "ablation_without_theta": baseline.ablations.without_theta,
+        "diagnostic_forced_accommodation": baseline.ablations.forced_accommodation,
         "ablation_without_action_conditioned_reservation": baseline.ablations.without_action_conditioned_reservation,
         "ablation_no_near_miss_screening": baseline.ablations.no_near_miss_screening,
         "D_H": D_H,
@@ -1543,6 +1583,56 @@ def _run_rpmi_selection_without_near_miss_screening(
     return select_action(actions, evaluations, params.theta)
 
 
+def _run_forced_accommodation_selection(
+    state: TrafficState,
+    context: Mapping[str, Any],
+    params: ActionConfig,
+) -> Any:
+    actions = _candidate_actions_for_logging(state, context, params)
+    baseline = evaluate_action(actions[0], state, params)
+    evaluations = [baseline]
+    for action in actions[1:]:
+        evaluations.append(evaluate_action(action, state, params, baseline_J=baseline.J))
+    non_none = [
+        item
+        for item in evaluations
+        if item.action_id != "a0_none" and item.matched_edge_ids and item.matched_count > 0
+    ]
+    if not non_none:
+        return select_action(actions, evaluations, theta=0.0)
+    selected = sorted(
+        non_none,
+        key=lambda item: (
+            item.C_bar,
+            item.matched_count,
+            -item.D_bar,
+            item.action_id,
+        ),
+        reverse=True,
+    )[0]
+    ranked = sorted(
+        evaluations,
+        key=lambda item: (item.action_id != selected.action_id, -item.RCMV, item.action_id),
+    )
+    final_evaluations = [
+        _copy_eval_flags(
+            evaluation,
+            selected=evaluation.action_id == selected.action_id,
+            rank=rank,
+            rejected_by_theta=False,
+        )
+        for rank, evaluation in enumerate(ranked, start=1)
+    ]
+    final_selected = next(item for item in final_evaluations if item.action_id == selected.action_id)
+    action_by_id = {action.action_id: action for action in actions}
+    return ActionSelectionResult(
+        baseline_evaluation=baseline,
+        evaluations=final_evaluations,
+        selected_action=action_by_id[final_selected.action_id],
+        selected_evaluation=final_selected,
+    )
+
+
 def _bruteforce_boundary_edges_as_near_misses(
     state: TrafficState,
     context: Mapping[str, Any],
@@ -1884,6 +1974,10 @@ def _action_config_for_scenario(
     if ablations.without_rd:
         values["RD_max"] = 1e9
         values["lambda_D"] = 0.0
+    if ablations.without_cbar:
+        values["lambda_C"] = 0.0
+    if ablations.without_theta:
+        values["theta"] = 0.0
     if ablations.slot_only_matching:
         values["conflict_mode"] = "slot_only_debug"
     return coerce_action_config(values)
@@ -1893,6 +1987,9 @@ def _merge_ablations(left: AblationConfig, right: AblationConfig) -> AblationCon
     return AblationConfig(
         without_rd=left.without_rd or right.without_rd,
         without_rcmv=left.without_rcmv or right.without_rcmv,
+        without_cbar=left.without_cbar or right.without_cbar,
+        without_theta=left.without_theta or right.without_theta,
+        forced_accommodation=left.forced_accommodation or right.forced_accommodation,
         without_action_conditioned_reservation=left.without_action_conditioned_reservation
         or right.without_action_conditioned_reservation,
         boundary_speed_only=left.boundary_speed_only or right.boundary_speed_only,

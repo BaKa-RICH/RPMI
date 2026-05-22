@@ -32,8 +32,10 @@ from rpmi.dynamics import step_traffic
 from rpmi.ids import make_decision_context_id
 from rpmi.logging_schema import CSV_LOG_SCHEMAS
 from rpmi.reservations import Reservation
+from rpmi.reservations import execute_reservation_guidance
 from rpmi.runner import (
     BaselineConfig,
+    apply_policy,
     build_decision_context,
     resolve_baseline_config,
 )
@@ -360,6 +362,9 @@ def _run_variant(
 ) -> dict[str, Any]:
     state = generate_state(scenario_config)
     params = _params_for_variant(full_params, variant)
+    baseline_config = _baseline_for_variant(variant)
+    params = _params_for_baseline_config(params, baseline_config)
+    scenario_for_run = _scenario_with_params(scenario_config, params)
     run_id = (
         f"{SOURCE_BATCH_ID}__{scenario_config.scenario_id}"
         f"__seed{scenario_config.seed}__{variant}"
@@ -377,30 +382,21 @@ def _run_variant(
         "time": 0.0,
         "decision_context_id": decision_context_id,
         "state_hash": hash_state(state),
-        "config_hash": _hash_variant_config(scenario_config, variant, params),
+        "config_hash": _hash_variant_config(scenario_for_run, variant, params),
         "code_version": "local_prompt3a_micro",
     }
     context = build_decision_context(
         state,
-        _scenario_with_params(scenario_config, params),
-        _baseline_for_variant(variant),
+        scenario_for_run,
+        baseline_config,
     )
     context["action_params"] = params
 
     if variant == "raw_largest_gap":
         policy_result = _raw_largest_gap_policy(state, context, params)
-    elif variant == "forced_accommodation":
-        policy_result = _forced_accommodation_policy(state, context, params)
     else:
-        selection = run_action_selection(state, context["qualities"], context["edge_map"], params)
-        policy_result = {
-            "selected_action": selection.selected_action,
-            "selected_evaluation": selection.selected_evaluation,
-            "baseline_evaluation": selection.baseline_evaluation,
-            "evaluations": selection.evaluations,
-            "actions_to_log": _actions_for_selection(state, context, params, selection.selected_action),
-            "instrumentation_note": "existing_rpmi_action_selection",
-        }
+        policy_result = apply_policy(baseline_config, state, context)
+        policy_result["instrumentation_note"] = f"first_class_baseline_config:{baseline_config.baseline_id}"
 
     selected_action: Action = policy_result["selected_action"]
     selected_eval: ActionEvaluation = policy_result["selected_evaluation"]
@@ -411,7 +407,7 @@ def _run_variant(
         state,
         selected_action,
         reservation,
-        context["edge_map"],
+        {edge.edge_id: edge for edge in selected_eval.edges} or context["edge_map"],
         params,
         log_context,
         demand_id,
@@ -487,22 +483,32 @@ def _scenario_with_params(config: ScenarioConfig, params: ActionConfig) -> Scena
 
 
 def _params_for_variant(params: ActionConfig, variant: str) -> ActionConfig:
-    if variant == "without_RD":
-        return replace(params, lambda_D=0.0, RD_max=1e9)
-    if variant == "without_Cbar":
-        return replace(params, lambda_C=0.0)
-    if variant == "without_theta":
-        return replace(params, theta=0.0)
-    if variant == "forced_accommodation":
-        return replace(params, theta=0.0, lambda_C=0.0)
+    del variant
     return params
+
+
+def _params_for_baseline_config(params: ActionConfig, baseline: BaselineConfig) -> ActionConfig:
+    updated = params
+    if baseline.ablations.without_rd:
+        updated = replace(updated, lambda_D=0.0, RD_max=1e9)
+    if getattr(baseline.ablations, "without_cbar", False):
+        updated = replace(updated, lambda_C=0.0)
+    if getattr(baseline.ablations, "without_theta", False):
+        updated = replace(updated, theta=0.0)
+    return updated
 
 
 def _baseline_for_variant(variant: str) -> BaselineConfig:
     if variant == "raw_largest_gap":
         return resolve_baseline_config("raw_gap_reservation")
+    if variant == "forced_accommodation":
+        return resolve_baseline_config("forced_accommodation")
     if variant == "without_RD":
         return resolve_baseline_config("rpmi_cmv_without_rd")
+    if variant == "without_Cbar":
+        return resolve_baseline_config("rpmi_cmv_without_cbar")
+    if variant == "without_theta":
+        return resolve_baseline_config("rpmi_cmv_without_theta")
     return resolve_baseline_config("rpmi_cmv")
 
 
@@ -801,8 +807,17 @@ def _execute_variant_event_window(
     horizon = max(params.H, (reservation.planned_tau if reservation else params.H), params.dt)
     steps = max(1, int(math.ceil(horizon / params.dt)))
     final_reservation = reservation
+    active_reservations = [] if final_reservation is None else [final_reservation]
     for _ in range(steps):
-        commands = commands_for_action(action, current.time, params)
+        action_commands = commands_for_action(action, current.time, params)
+        guidance_commands, active_reservations = execute_reservation_guidance(
+            current,
+            active_reservations,
+            current.time,
+            u_min=params.u_min,
+            u_max=params.u_max,
+        )
+        commands = {**action_commands, **guidance_commands}
         current, step_rows, step_events = step_traffic(
             current,
             commands,
@@ -816,8 +831,11 @@ def _execute_variant_event_window(
         )
         vehicle_rows.extend(step_rows)
         interval_events.extend(step_events)
-        if final_reservation and final_reservation.status == "planned" and current.time + 1e-9 >= final_reservation.planned_tau:
+        if active_reservations:
+            final_reservation = active_reservations[0]
+        if final_reservation and final_reservation.status in {"planned", "active_guidance"} and current.time + 1e-9 >= final_reservation.planned_tau:
             final_reservation = _finalize_reservation_at_tau(current, final_reservation, edge_map)
+            active_reservations = [final_reservation]
     status = "" if final_reservation is None else final_reservation.status
     event_type = _event_type_for_status(status, interval_events)
     event_reason = _event_reason_for_status(final_reservation, interval_events)
