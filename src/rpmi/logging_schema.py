@@ -214,16 +214,47 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
     ],
     "realized_events.csv": SHARED_COLUMNS
     + [
+        "realized_event_id",
         "event_id",
+        "scenario_id",
+        "seed",
+        "algorithm_id",
+        "linked_action_id",
+        "linked_edge_id",
+        "linked_gap_id",
+        "linked_reservation_id",
+        "linked_demand_id",
+        "ramp_vehicle_id",
+        "event_time",
         "event_type",
+        "event_severity",
+        "merge_success",
+        "event_reason",
         "vehicle_ids",
         "min_gap",
         "min_margin",
         "severity",
-        "linked_reservation_id",
-        "linked_action_id",
-        "linked_edge_id",
         "note",
+    ],
+    "event_metric_windows.csv": SHARED_COLUMNS
+    + [
+        "realized_event_id",
+        "metric_window_start",
+        "metric_window_end",
+        "hard_brake_count",
+        "max_deceleration",
+        "max_deceleration_magnitude",
+        "mean_abs_acceleration",
+        "speed_variance_before",
+        "speed_variance_after",
+        "speed_variance_delta",
+        "max_wave_amplitude",
+        "mainline_disturbance_cost",
+        "min_TTC",
+        "unsafe_overlap_count",
+        "RD_realized_proxy",
+        "RD_pred",
+        "RD_prediction_error",
     ],
     "metrics_step.csv": SHARED_COLUMNS
     + [
@@ -323,6 +354,7 @@ CSV_LOG_SCHEMAS: dict[str, list[str]] = {
         "merge_success",
         "predicted_unserved",
         "realized_unserved",
+        "realized_event_id",
     ],
     "rolling_slot_consumption.csv": SHARED_COLUMNS
     + [
@@ -483,6 +515,15 @@ def append_realized_event_rows(
     """Append no-fallback event rows to ``realized_events.csv``."""
 
     append_csv_rows(path, CSV_LOG_SCHEMAS["realized_events.csv"], rows)
+
+
+def append_event_metric_window_rows(
+    path: str | Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Append event-level before/after metric windows."""
+
+    append_csv_rows(path, CSV_LOG_SCHEMAS["event_metric_windows.csv"], rows)
 
 
 def append_slot_rows(

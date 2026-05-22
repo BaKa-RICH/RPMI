@@ -49,6 +49,8 @@ from rpmi.logging_schema import (
     append_action_lifecycle_rows,
     append_action_rows,
     append_decision_context_rows,
+    append_event_metric_window_rows,
+    append_realized_event_rows,
     append_rolling_demand_lifecycle_rows,
     append_rolling_failure_trace_rows,
     append_rolling_matching_trace_rows,
@@ -732,6 +734,8 @@ def build_wave8_evidence_package(
         "rolling_matching_trace.csv",
         "rolling_plan_commitment.csv",
         "rolling_failure_trace.csv",
+        "realized_events.csv",
+        "event_metric_windows.csv",
         "rolling_vs_single_demand_metrics.csv",
         "rolling_vs_stale_ablation_metrics.csv",
         "rolling_vs_no_commitment_metrics.csv",
@@ -765,6 +769,8 @@ def build_wave8_evidence_package(
     _copy_file(collected["rolling_matching_trace.csv"], gate_dir / "rolling_matching_trace.csv")
     _copy_file(collected["rolling_plan_commitment.csv"], gate_dir / "rolling_plan_commitment.csv")
     _copy_file(collected["rolling_failure_trace.csv"], gate_dir / "rolling_failure_trace.csv")
+    _copy_file(collected["realized_events.csv"], gate_dir / "realized_events.csv")
+    _copy_file(collected["event_metric_windows.csv"], gate_dir / "event_metric_windows.csv")
     _copy_file(collected["rolling_vs_single_demand_metrics.csv"], gate_dir / "rolling_vs_single_demand_metrics.csv")
     _copy_file(collected["rolling_vs_stale_ablation_metrics.csv"], gate_dir / "rolling_vs_stale_ablation_metrics.csv")
     _copy_file(collected["rolling_vs_no_commitment_metrics.csv"], gate_dir / "rolling_vs_no_commitment_metrics.csv")
@@ -1419,6 +1425,34 @@ def _cancel_reservation(
         metrics_acc["reservation_cancel_count"] += 1
         metrics_acc["reservation_churn_count"] += 1
     metrics_acc.setdefault("returned_demands_pending_reassignment", set()).add(reservation.demand_id)
+    event_type = "expiration_return" if reason == "reservation_tau_expired" else "merge_failure"
+    event_id = _make_realized_event_id(
+        str(log_context.get("run_id", "")),
+        context_id,
+        event_type,
+        reservation_id=reservation.reservation_id,
+        demand_id=reservation.demand_id,
+        action_id=reservation.action_id,
+        edge_id=reservation.edge.edge_id,
+    )
+    reservation.realized_event_id = event_id
+    _write_realized_event_and_metric_window(
+        run_path,
+        log_context,
+        realized_event_id=event_id,
+        event_type=event_type,
+        event_reason=reason,
+        event_time=float(log_context.get("time", 0.0) or 0.0),
+        event_severity=1.0,
+        merge_success=False,
+        action_id=reservation.action_id,
+        edge_id=reservation.edge.edge_id,
+        gap_id=reservation.physical_gap_id,
+        reservation_id=reservation.reservation_id,
+        demand_id=reservation.demand_id,
+        ramp_vehicle_id=reservation.ramp_vehicle_id,
+        note="rolling reservation terminal failure",
+    )
     _write_reservation_state_row(run_path, log_context, reservation, before, reservation.status, demand_before, demand_after)
     _write_demand_row(
         run_path,
@@ -1433,6 +1467,7 @@ def _cancel_reservation(
         False,
         False,
         False,
+        event_id,
     )
     _write_failure_row(
         run_path,
@@ -1444,7 +1479,7 @@ def _cancel_reservation(
         reservation.reservation_id,
         reservation.demand_id,
         reservation.physical_gap_id,
-        "",
+        event_id,
         "reservation_lifecycle",
         reason,
         False,
@@ -1543,6 +1578,7 @@ def _execute_interval(
     current = current_state
     steps = max(1, int(round(interval / params.dt)))
     vehicle_rows: list[dict[str, Any]] = []
+    interval_events: list[dict[str, Any]] = []
     for _ in range(steps):
         commands = commands_for_action(selected_action, current.time, params)
         guidance = _guidance_commands(committed, current.time, params)
@@ -1562,7 +1598,41 @@ def _execute_interval(
             metrics_acc["no_hidden_fallback_invalid_event_count"] += int(
                 event.get("event_type") in {"overlap", "negative_margin"}
             )
+        interval_events.extend(step_events)
     append_vehicle_step_rows(run_path / "vehicles_step.csv", vehicle_rows)
+    for event in interval_events:
+        link = _step_event_link(event, committed, selected_action.action_id)
+        event_type = str(event.get("event_type", "realized_transition"))
+        event_id = _make_realized_event_id(
+            str(log_context.get("run_id", "")),
+            str(log_context.get("decision_context_id", "")),
+            event_type,
+            reservation_id=link.get("reservation_id", ""),
+            demand_id=link.get("demand_id", ""),
+            action_id=link.get("action_id", ""),
+            edge_id=link.get("edge_id", ""),
+            suffix=str(event.get("event_id", "")),
+        )
+        _write_realized_event_and_metric_window(
+            run_path,
+            log_context,
+            realized_event_id=event_id,
+            event_type=event_type,
+            event_reason="realized_no_fallback_event",
+            event_time=float(event.get("time", current.time) or current.time),
+            event_severity=float(event.get("severity", 0.0) or 0.0),
+            merge_success=False,
+            action_id=link.get("action_id", ""),
+            edge_id=link.get("edge_id", ""),
+            gap_id=link.get("gap_id", ""),
+            reservation_id=link.get("reservation_id", ""),
+            demand_id=link.get("demand_id", ""),
+            ramp_vehicle_id=link.get("ramp_vehicle_id", ""),
+            vehicle_ids=event.get("vehicle_ids", []),
+            min_gap=event.get("min_gap", ""),
+            min_margin=event.get("min_margin", ""),
+            note=str(event.get("note", "")),
+        )
     executed_fraction = min(max((current.time - context_time) / max(interval, 1e-9), 0.0), 1.0)
     metrics_acc["action_executed_fractions"].append(executed_fraction)
     _write_action_lifecycle(
@@ -1580,6 +1650,33 @@ def _execute_interval(
         "",
     )
     return current
+
+
+def _step_event_link(
+    event: Mapping[str, Any],
+    committed: Mapping[str, CommittedReservation],
+    selected_action_id: str,
+) -> dict[str, Any]:
+    reservation_id = str(event.get("linked_reservation_id") or "")
+    action_id = str(event.get("linked_action_id") or selected_action_id or "")
+    reservation = committed.get(reservation_id) if reservation_id else None
+    if reservation is None and action_id:
+        reservation = next(
+            (
+                item
+                for item in committed.values()
+                if item.action_id == action_id and item.status in ACTIVE_RESERVATION_STATUSES
+            ),
+            None,
+        )
+    return {
+        "reservation_id": reservation.reservation_id if reservation else reservation_id,
+        "demand_id": reservation.demand_id if reservation else "",
+        "action_id": reservation.action_id if reservation else action_id,
+        "edge_id": reservation.edge.edge_id if reservation else str(event.get("linked_edge_id") or ""),
+        "gap_id": reservation.physical_gap_id if reservation else "",
+        "ramp_vehicle_id": reservation.ramp_vehicle_id if reservation else "",
+    }
 
 
 def _guidance_commands(
@@ -1638,6 +1735,34 @@ def _mark_interval_merges(
         consumed_gaps.add(reservation.physical_gap_id)
         blocked_gaps.add(reservation.physical_gap_id)
         metrics_acc["merge_success_count"] += 1
+        event_id = _make_realized_event_id(
+            str(log_context.get("run_id", "")),
+            context_id,
+            "merge_success",
+            reservation_id=reservation.reservation_id,
+            demand_id=reservation.demand_id,
+            action_id=reservation.action_id,
+            edge_id=reservation.edge.edge_id,
+        )
+        reservation.realized_event_id = event_id
+        _write_realized_event_and_metric_window(
+            run_path,
+            log_context,
+            realized_event_id=event_id,
+            event_type="merge_success",
+            event_reason="merge_success",
+            event_time=current_time,
+            event_severity=0.0,
+            merge_success=True,
+            action_id=reservation.action_id,
+            edge_id=reservation.edge.edge_id,
+            gap_id=reservation.physical_gap_id,
+            reservation_id=reservation.reservation_id,
+            demand_id=reservation.demand_id,
+            ramp_vehicle_id=reservation.ramp_vehicle_id,
+            vehicle_ids=[reservation.ramp_vehicle_id],
+            note="rolling reservation merge success",
+        )
         _write_demand_row(
             run_path,
             log_context,
@@ -1651,6 +1776,7 @@ def _mark_interval_merges(
             True,
             False,
             False,
+            event_id,
         )
         _write_reservation_state_row(run_path, log_context, reservation, before_status, "merged", demand_before, "merged")
         _write_slot_row(run_path, log_context, reservation, "reserved", "consumed", reservation.demand_id, False)
@@ -1680,6 +1806,25 @@ def _mark_unserved_at_final_context(
             continue
         demand_status[demand_id] = "unserved"
         metrics_acc["returned_demand_unserved_count"] += int(status.startswith("returned_"))
+        event_id = _make_realized_event_id(
+            str(log_context.get("run_id", "")),
+            context_id,
+            "unserved",
+            demand_id=demand_id,
+        )
+        _write_realized_event_and_metric_window(
+            run_path,
+            log_context,
+            realized_event_id=event_id,
+            event_type="merge_failure",
+            event_reason="rolling_horizon_end_unserved",
+            event_time=float(log_context.get("time", 0.0) or 0.0),
+            event_severity=1.0,
+            merge_success=False,
+            demand_id=demand_id,
+            ramp_vehicle_id=_ramp_id_from_demand_id(demand_id),
+            note="rolling horizon ended with unserved demand",
+        )
         _write_demand_row(
             run_path,
             log_context,
@@ -1693,6 +1838,7 @@ def _mark_unserved_at_final_context(
             False,
             False,
             True,
+            event_id,
         )
 
 
@@ -1722,6 +1868,25 @@ def _resolve_action_overlap(
         return selected_action, selected_eval
     metrics_acc["overlap_reject_count"] += overlap
     rejected = replace(selected_action, rejected_before_rollout=True, reject_reason="controlled_CAV_overlap")
+    event_id = _make_realized_event_id(
+        str(log_context.get("run_id", "")),
+        str(log_context.get("decision_context_id", "")),
+        "invalid_action_transition",
+        action_id=rejected.action_id,
+        suffix="controlled_CAV_overlap",
+    )
+    _write_realized_event_and_metric_window(
+        run_path,
+        log_context,
+        realized_event_id=event_id,
+        event_type="invalid_realized_transition",
+        event_reason="controlled_CAV_overlap",
+        event_time=context_time,
+        event_severity=float(overlap),
+        merge_success=False,
+        action_id=rejected.action_id,
+        note="selected action rejected because it overlapped active guidance",
+    )
     _write_action_lifecycle(
         run_path,
         log_context,
@@ -1734,7 +1899,7 @@ def _resolve_action_overlap(
         "controlled_CAV_overlap",
         overlap,
         "",
-        "",
+        event_id,
     )
     return _none_action(), selected_eval
 
@@ -1796,6 +1961,7 @@ def _write_demand_row(
     merge_success: bool,
     predicted_unserved: bool,
     realized_unserved: bool,
+    realized_event_id: str = "",
 ) -> None:
     append_rolling_demand_lifecycle_rows(
         run_path / "rolling_demand_lifecycle.csv",
@@ -1812,6 +1978,7 @@ def _write_demand_row(
                 "merge_success": merge_success,
                 "predicted_unserved": predicted_unserved,
                 "realized_unserved": realized_unserved,
+                "realized_event_id": realized_event_id,
             }
         ],
     )
@@ -2039,6 +2206,32 @@ def _write_slot_conflict_failure(
     gap_id: str,
 ) -> None:
     reservation_id = f"blocked_{_safe_id(edge.edge_id)}"
+    event_id = _make_realized_event_id(
+        str(log_context.get("run_id", "")),
+        context_id,
+        "slot_conflict",
+        reservation_id=reservation_id,
+        demand_id=demand_id,
+        action_id=action_id,
+        edge_id=edge.edge_id,
+    )
+    _write_realized_event_and_metric_window(
+        run_path,
+        log_context,
+        realized_event_id=event_id,
+        event_type="merge_failure",
+        event_reason="physical_gap_consumed_or_blocked",
+        event_time=float(log_context.get("time", 0.0) or 0.0),
+        event_severity=1.0,
+        merge_success=False,
+        action_id=action_id,
+        edge_id=edge.edge_id,
+        gap_id=gap_id,
+        reservation_id=reservation_id,
+        demand_id=demand_id,
+        ramp_vehicle_id=_ramp_id_from_demand_id(demand_id),
+        note="slot conflict conservative blocking",
+    )
     _write_failure_row(
         run_path,
         log_context,
@@ -2049,7 +2242,7 @@ def _write_slot_conflict_failure(
         reservation_id,
         demand_id,
         gap_id,
-        "",
+        event_id,
         "slot_consumption",
         "physical_gap_consumed_or_blocked",
         False,
@@ -2092,6 +2285,258 @@ def _write_action_lifecycle(
             }
         ],
     )
+
+
+def _make_realized_event_id(
+    run_id: str,
+    context_id: str,
+    event_type: str,
+    *,
+    reservation_id: str = "",
+    demand_id: str = "",
+    action_id: str = "",
+    edge_id: str = "",
+    suffix: str = "",
+) -> str:
+    anchor = reservation_id or demand_id or edge_id or action_id or suffix or "event"
+    payload = {
+        "run_id": run_id,
+        "decision_context_id": context_id,
+        "event_type": event_type,
+        "anchor": anchor,
+        "suffix": suffix,
+    }
+    digest = hash_config(payload, n=10)
+    return f"rev_{_safe_id(run_id)}_{_safe_id(context_id)}_{_safe_id(event_type)}_{digest}"
+
+
+def _scenario_id_from_run(run_id: str) -> str:
+    parts = str(run_id).split("__")
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def _seed_from_run(run_id: str) -> str:
+    for part in str(run_id).split("__"):
+        if part.startswith("seed"):
+            return part.removeprefix("seed")
+    return ""
+
+
+def _algorithm_id_from_run(run_id: str) -> str:
+    parts = str(run_id).split("__")
+    return parts[-1] if parts else ""
+
+
+def _write_realized_event_and_metric_window(
+    run_path: Path,
+    log_context: Mapping[str, Any],
+    *,
+    realized_event_id: str,
+    event_type: str,
+    event_reason: str,
+    event_time: float,
+    event_severity: float,
+    merge_success: bool,
+    action_id: str = "",
+    edge_id: str = "",
+    gap_id: str = "",
+    reservation_id: str = "",
+    demand_id: str = "",
+    ramp_vehicle_id: int | str = "",
+    vehicle_ids: Sequence[Any] | str = "",
+    min_gap: Any = "",
+    min_margin: Any = "",
+    note: str = "",
+) -> None:
+    run_id = str(log_context.get("run_id", ""))
+    event_context = dict(log_context)
+    event_context["time"] = event_time
+    append_realized_event_rows(
+        run_path / "realized_events.csv",
+        [
+            {
+                **event_context,
+                "realized_event_id": realized_event_id,
+                "event_id": realized_event_id,
+                "scenario_id": _scenario_id_from_run(run_id),
+                "seed": _seed_from_run(run_id),
+                "algorithm_id": _algorithm_id_from_run(run_id),
+                "linked_action_id": action_id,
+                "linked_edge_id": edge_id,
+                "linked_gap_id": gap_id,
+                "linked_reservation_id": reservation_id,
+                "linked_demand_id": demand_id,
+                "ramp_vehicle_id": ramp_vehicle_id,
+                "event_time": event_time,
+                "event_type": event_type,
+                "event_severity": event_severity,
+                "merge_success": merge_success,
+                "event_reason": event_reason,
+                "vehicle_ids": list(vehicle_ids) if not isinstance(vehicle_ids, str) else vehicle_ids,
+                "min_gap": min_gap,
+                "min_margin": min_margin,
+                "severity": event_severity,
+                "note": note,
+            }
+        ],
+    )
+    append_event_metric_window_rows(
+        run_path / "event_metric_windows.csv",
+        [
+            {
+                **event_context,
+                **_event_metric_window_row(
+                    run_path,
+                    realized_event_id,
+                    event_time,
+                    action_id=action_id,
+                    edge_id=edge_id,
+                    context_id=str(log_context.get("decision_context_id", "")),
+                ),
+            }
+        ],
+    )
+
+
+def _event_metric_window_row(
+    run_path: Path,
+    realized_event_id: str,
+    event_time: float,
+    *,
+    action_id: str,
+    edge_id: str,
+    context_id: str,
+) -> dict[str, Any]:
+    window_start = max(0.0, float(event_time) - 1.0)
+    window_end = float(event_time) + 1.0
+    rows = _read_csv(run_path / "vehicles_step.csv")
+    scoped = [
+        row
+        for row in rows
+        if (to_float := _to_float(row.get("time"))) is not None and window_start - 1e-9 <= to_float <= window_end + 1e-9
+    ]
+    before_rows = [row for row in scoped if (_to_float(row.get("time")) or 0.0) <= float(event_time) + 1e-9]
+    after_rows = [row for row in scoped if (_to_float(row.get("time")) or 0.0) >= float(event_time) - 1e-9]
+    all_metrics = _vehicle_window_metrics(scoped)
+    before_metrics = _vehicle_window_metrics(before_rows)
+    after_metrics = _vehicle_window_metrics(after_rows)
+    rd_pred = _rd_pred_for_event(run_path, context_id, action_id, edge_id)
+    rd_realized = all_metrics.get("RD_realized_proxy")
+    return {
+        "realized_event_id": realized_event_id,
+        "metric_window_start": window_start,
+        "metric_window_end": window_end,
+        "hard_brake_count": all_metrics.get("hard_brake_count", 0),
+        "max_deceleration": all_metrics.get("max_deceleration", ""),
+        "max_deceleration_magnitude": all_metrics.get("max_deceleration_magnitude", ""),
+        "mean_abs_acceleration": all_metrics.get("mean_abs_acceleration", ""),
+        "speed_variance_before": before_metrics.get("speed_variance_all", ""),
+        "speed_variance_after": after_metrics.get("speed_variance_all", ""),
+        "speed_variance_delta": _subtract_or_blank(
+            after_metrics.get("speed_variance_all"),
+            before_metrics.get("speed_variance_all"),
+        ),
+        "max_wave_amplitude": all_metrics.get("max_wave_amplitude", ""),
+        "mainline_disturbance_cost": all_metrics.get("mainline_disturbance_cost", ""),
+        "min_TTC": all_metrics.get("min_TTC", ""),
+        "unsafe_overlap_count": all_metrics.get("unsafe_overlap_count", 0),
+        "RD_realized_proxy": rd_realized,
+        "RD_pred": rd_pred,
+        "RD_prediction_error": _subtract_or_blank(rd_realized, rd_pred),
+    }
+
+
+def _vehicle_window_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    mainline = [row for row in rows if row.get("role") == "mainline"]
+    scoped = mainline if mainline else list(rows)
+    accelerations = [_to_float(row.get("a_eff")) for row in scoped]
+    accelerations = [value for value in accelerations if value is not None]
+    speeds = [_to_float(row.get("v")) for row in scoped]
+    speeds = [value for value in speeds if value is not None]
+    by_time: dict[str, list[float]] = {}
+    for row in scoped:
+        speed = _to_float(row.get("v"))
+        if speed is None:
+            continue
+        by_time.setdefault(str(row.get("time", "")), []).append(speed)
+    wave_amplitudes = [max(values) - min(values) for values in by_time.values() if values]
+    min_accel = min(accelerations) if accelerations else None
+    max_decel_mag = abs(min_accel) if min_accel is not None and min_accel < 0 else (0.0 if min_accel is not None else "")
+    hard_brakes = sum(1 for value in accelerations if value <= -4.5 + 1e-9)
+    mean_abs_accel = _mean([abs(value) for value in accelerations])
+    speed_var = _variance(speeds)
+    max_wave = max(wave_amplitudes) if wave_amplitudes else 0.0
+    unsafe_overlap = sum(1 for row in scoped if _truthy(row.get("invalid_overlap_flag", "")))
+    disturbance = mean_abs_accel + hard_brakes + 0.01 * max_wave + 10.0 * unsafe_overlap
+    return {
+        "hard_brake_count": hard_brakes,
+        "max_deceleration": "" if min_accel is None else min_accel,
+        "max_deceleration_magnitude": max_decel_mag,
+        "mean_abs_acceleration": mean_abs_accel,
+        "speed_variance_all": speed_var,
+        "max_wave_amplitude": max_wave,
+        "mainline_disturbance_cost": disturbance,
+        "min_TTC": _min_ttc(scoped),
+        "unsafe_overlap_count": unsafe_overlap,
+        "RD_realized_proxy": (0.0 if max_decel_mag == "" else float(max_decel_mag)) + hard_brakes,
+    }
+
+
+def _rd_pred_for_event(run_path: Path, context_id: str, action_id: str, edge_id: str) -> float | str:
+    for row in _read_csv(run_path / "rolling_matching_trace.csv"):
+        if (
+            row.get("decision_context_id") == context_id
+            and row.get("action_id") == action_id
+            and row.get("edge_id") == edge_id
+        ):
+            value = _to_float(row.get("RD"))
+            return "" if value is None else value
+    return ""
+
+
+def _min_ttc(rows: Sequence[Mapping[str, Any]]) -> float | str:
+    by_time: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        by_time.setdefault(str(row.get("time", "")), {})[str(row.get("vehicle_id", ""))] = row
+    ttcs: list[float] = []
+    for group in by_time.values():
+        for row in group.values():
+            leader_id = str(row.get("leader_id", "")).strip()
+            if not leader_id or leader_id not in group:
+                continue
+            gap = _to_float(row.get("gap_to_leader"))
+            follower_v = _to_float(row.get("v"))
+            leader_v = _to_float(group[leader_id].get("v"))
+            if gap is None or follower_v is None or leader_v is None:
+                continue
+            closing = follower_v - leader_v
+            if gap > 0 and closing > 1e-9:
+                ttcs.append(gap / closing)
+    return min(ttcs) if ttcs else ""
+
+
+def _variance(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    avg = sum(values) / len(values)
+    return sum((value - avg) ** 2 for value in values) / len(values)
+
+
+def _subtract_or_blank(left: Any, right: Any) -> float | str:
+    left_value = _to_float(left)
+    right_value = _to_float(right)
+    if left_value is None or right_value is None:
+        return ""
+    return left_value - right_value
+
+
+def _to_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _rolling_metrics(
@@ -2494,6 +2939,8 @@ def _write_gate_d2_manifest(path: str | Path, *, batch_id: str) -> Path:
             "rolling_matching_trace.csv",
             "rolling_plan_commitment.csv",
             "rolling_failure_trace.csv",
+            "realized_events.csv",
+            "event_metric_windows.csv",
             "rolling_vs_single_demand_metrics.csv",
             "rolling_vs_stale_ablation_metrics.csv",
             "rolling_vs_no_commitment_metrics.csv",
