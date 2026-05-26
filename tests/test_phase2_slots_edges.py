@@ -14,6 +14,7 @@ from rpmi.slots import (
     build_edges,
     compute_edge_validity,
     compute_feasible_interval,
+    compute_safety_distances,
     compute_inventory_metrics,
     edge_quality_to_row,
     evaluate_survival,
@@ -152,6 +153,96 @@ def test_negative_width_has_separate_physical_reason():
     assert quality.V_phys_buffer == 0
     assert quality.P_R == 0.0
     assert quality.fail_reason_priority == "PHYS_WIDTH_NEGATIVE"
+
+
+def test_dynamic_safety_distances_use_side_headways_and_closing_terms():
+    edge = basic_edge()
+    equal_speed = state_at(
+        1.0,
+        [
+            vehicle(1, veh_type="CAV", x=170.0, v=20.0),
+            vehicle(2, veh_type="HDV", x=110.0, v=20.0),
+            vehicle(9, role="ramp", veh_type="CAV", lane=-1, x=144.0, v=20.0),
+        ],
+    )
+    params = SlotInventoryParams(
+        d0=2.0,
+        T_front_CAV_following=1.2,
+        T_rear_HDV_following=1.6,
+        b_safe=2.5,
+    )
+
+    d_front, d_rear = compute_safety_distances(edge, equal_speed, params)
+
+    assert d_front == pytest.approx(26.0)
+    assert d_rear == pytest.approx(34.0)
+
+    ramp_faster = state_at(
+        1.0,
+        [
+            vehicle(1, veh_type="CAV", x=170.0, v=18.0),
+            vehicle(2, veh_type="HDV", x=110.0, v=20.0),
+            vehicle(9, role="ramp", veh_type="CAV", lane=-1, x=144.0, v=20.0),
+        ],
+    )
+    rear_faster = state_at(
+        1.0,
+        [
+            vehicle(1, veh_type="CAV", x=170.0, v=20.0),
+            vehicle(2, veh_type="HDV", x=110.0, v=23.0),
+            vehicle(9, role="ramp", veh_type="CAV", lane=-1, x=144.0, v=20.0),
+        ],
+    )
+
+    assert compute_safety_distances(edge, ramp_faster, params)[0] == pytest.approx(26.8)
+    assert compute_safety_distances(edge, rear_faster, params)[1] == pytest.approx(40.6)
+
+
+def test_dynamic_safety_distances_fall_back_to_legacy_t_safe():
+    edge = basic_edge()
+    tau_state = state_at(
+        1.0,
+        [
+            vehicle(1, x=170.0, v=20.0),
+            vehicle(2, x=110.0, v=20.0),
+            vehicle(9, role="ramp", lane=-1, x=144.0, v=20.0),
+        ],
+    )
+
+    assert compute_safety_distances(
+        edge,
+        tau_state,
+        SlotInventoryParams(d0=2.0, T_safe=1.0),
+    ) == pytest.approx((22.0, 22.0))
+
+
+def test_db1_c5_gap55_has_negative_width_at_tau35_with_dynamic_safety():
+    edge = basic_edge(tau=3.5)
+    tau_state = state_at(
+        3.5,
+        [
+            vehicle(1, veh_type="CAV", x=170.0, v=20.0),
+            vehicle(2, veh_type="HDV", x=110.0, v=20.0),
+            vehicle(9, role="ramp", veh_type="CAV", lane=-1, x=144.0, v=20.0),
+        ],
+    )
+    interval = compute_feasible_interval(
+        edge,
+        tau_state,
+        SlotInventoryParams(
+            d0=2.0,
+            T_front_CAV_following=1.2,
+            T_rear_HDV_following=1.6,
+            b_safe=2.5,
+            W_min_buffer=0.0,
+        ),
+    )
+
+    assert interval.d_front == pytest.approx(26.0)
+    assert interval.d_rear == pytest.approx(34.0)
+    assert interval.width == pytest.approx(-10.0)
+    assert interval.V_phys_theory == 0
+    assert interval.V_phys_buffer == 0
 
 
 def test_theory_validity_is_separate_from_buffer_validity():

@@ -144,6 +144,7 @@ def generate_initial_vehicles(
                 x=front_x,
                 v=speed + values["front_speed_offsets"][index % len(values["front_speed_offsets"])],
                 a=0.0,
+                idm_params=_idm_params_for_vehicle(front_type, "front", values),
             )
         )
         next_id += 1
@@ -156,6 +157,7 @@ def generate_initial_vehicles(
                 x=rear_x,
                 v=speed + values["rear_speed_offsets"][index % len(values["rear_speed_offsets"])],
                 a=0.0,
+                idm_params=_idm_params_for_vehicle(rear_type, "rear", values),
             )
         )
         next_id += 1
@@ -170,6 +172,11 @@ def generate_initial_vehicles(
                 x=x0 - index * 35.0,
                 v=speed,
                 a=0.0,
+                idm_params=_idm_params_for_vehicle(
+                    "CAV" if index % 2 == 0 else "HDV",
+                    "inner",
+                    values,
+                ),
             )
         )
         next_id += 1
@@ -185,6 +192,7 @@ def generate_initial_vehicles(
                 x=values["ramp_start_x"] - index * values["ramp_spacing"],
                 v=values["ramp_speed"] + index * values["ramp_speed_step"],
                 a=0.0,
+                idm_params=_idm_params_for_vehicle("CAV", "ramp", values),
             )
         )
     return apply_template_perturbation(vehicles, rng or random.Random(config.seed), config)
@@ -374,29 +382,26 @@ def classify_near_miss(
             screen_score=0.0,
             reason="edge_already_reservable",
         )
-    buffer_near = (
-        edge_quality.V_phys_theory == 1
-        and edge_quality.V_phys_buffer == 0
-        and edge_quality.delta_W_req <= threshold
-    )
+    width_deficit = max(float(edge_quality.delta_W_req), max(-float(edge_quality.W), 0.0))
+    width_near = edge_quality.V_phys_buffer == 0 and width_deficit <= threshold
     rd_near = edge_quality.I_reach == 1 and edge_quality.I_safe == 1 and edge_quality.RD <= rd_max
-    if not (buffer_near or rd_near):
+    if not (width_near or rd_near):
         return NearMissLabel(
             is_near_miss=False,
             near_miss_type="none",
-            delta_W_req=edge_quality.delta_W_req,
+            delta_W_req=width_deficit,
             available_modes=(),
             screen_score=0.0,
             reason=edge_quality.fail_reason_priority,
         )
 
     modes = _available_modes_for_boundary(boundary_type, params)
-    near_type = "buffer_width" if buffer_near else "recovery_debt"
-    score = 1.0 / (1.0 + max(edge_quality.delta_W_req, 0.0) + max(edge_quality.RD, 0.0))
+    near_type = "width_deficit" if width_near else "recovery_debt"
+    score = 1.0 / (1.0 + width_deficit + max(edge_quality.RD, 0.0))
     return NearMissLabel(
         is_near_miss=bool(modes),
         near_miss_type=near_type,
-        delta_W_req=edge_quality.delta_W_req,
+        delta_W_req=width_deficit,
         available_modes=modes,
         screen_score=score,
         reason="near_miss_available" if modes else "no_boundary_cav_mode",
@@ -1026,6 +1031,11 @@ def _slot_params(config: ScenarioConfig) -> SlotInventoryParams:
         target_lane=int(values["target_lane"]),
         W_min_buffer=float(values["W_min_buffer"]),
         RD_max=float(values["RD_max"]),
+        d0=float(values.get("d0", 0.0)),
+        T_safe=float(values.get("T_safe", 0.0)),
+        T_front_CAV_following=_optional_float(values.get("T_front_CAV_following")),
+        T_rear_HDV_following=_optional_float(values.get("T_rear_HDV_following")),
+        b_safe=_optional_float(values.get("b_safe")),
         u_min=float(values["u_min"]),
         u_max=float(values["u_max"]),
         rd_speed_scale=float(values["rd_speed_scale"]),
@@ -1039,6 +1049,35 @@ def _boundary_pair_types(value: str) -> tuple[str, str]:
         return ("HDV", "HDV")
     front, rear = parts[0].upper(), parts[1].upper()
     return ("CAV" if front == "CAV" else "HDV", "CAV" if rear == "CAV" else "HDV")
+
+
+def _idm_params_for_vehicle(
+    veh_type: str,
+    role_key: str,
+    values: Mapping[str, Any],
+) -> dict[str, float] | None:
+    merged: dict[str, float] = {}
+    role_mapping = values.get(f"{role_key}_idm_params")
+    if isinstance(role_mapping, Mapping):
+        merged.update({str(key): float(value) for key, value in role_mapping.items()})
+    generic_key = "cav_idm_params" if veh_type == "CAV" else "hdv_idm_params"
+    generic_mapping = values.get(generic_key)
+    if isinstance(generic_mapping, Mapping):
+        merged = {str(key): float(value) for key, value in generic_mapping.items()} | merged
+    v0_key = {
+        "front": "front_nominal_v0",
+        "rear": "rear_nominal_v0",
+        "inner": "inner_nominal_v0",
+        "ramp": "ramp_nominal_v0",
+    }.get(role_key)
+    v0_value = values.get(v0_key) if v0_key is not None else None
+    if v0_value is not None:
+        merged["v0"] = float(v0_value)
+    return merged or None
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def _boundary_type_for_edge(state: TrafficState, edge: Edge) -> str:

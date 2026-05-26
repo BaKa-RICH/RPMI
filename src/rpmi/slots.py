@@ -35,6 +35,9 @@ class SlotInventoryParams:
     RD_max: float = 1.0
     d0: float = 0.0
     T_safe: float = 0.0
+    T_front_CAV_following: float | None = None
+    T_rear_HDV_following: float | None = None
+    b_safe: float | None = None
     u_min: float = -4.5
     u_max: float = 2.0
     rd_speed_scale: float = 10.0
@@ -234,10 +237,26 @@ def compute_safety_distances(
     """Compute front and rear safety distances used by the interval formula."""
 
     values = coerce_inventory_params(params)
+    front = state_tau.vehicles[edge.front_id]
     ramp = state_tau.vehicles[edge.ramp_id]
     rear = state_tau.vehicles[edge.rear_id]
-    d_front = values.d0 + values.T_safe * max(ramp.v, 0.0)
-    d_rear = values.d0 + values.T_safe * max(rear.v, 0.0)
+    T_front = _safety_time_headway(values.T_front_CAV_following, values.T_safe)
+    T_rear = _safety_time_headway(values.T_rear_HDV_following, values.T_safe)
+    b_safe = None if values.b_safe is None else max(values.b_safe, 1e-9)
+    closing_front = max(ramp.v - front.v, 0.0)
+    closing_rear = max(rear.v - ramp.v, 0.0)
+    front_closing_term = 0.0 if b_safe is None else closing_front * closing_front / (2.0 * b_safe)
+    rear_closing_term = 0.0 if b_safe is None else closing_rear * closing_rear / (2.0 * b_safe)
+    d_front = (
+        values.d0
+        + T_front * max(ramp.v, 0.0)
+        + front_closing_term
+    )
+    d_rear = (
+        values.d0
+        + T_rear * max(rear.v, 0.0)
+        + rear_closing_term
+    )
     return d_front, d_rear
 
 
@@ -376,6 +395,12 @@ def compute_recovery_debt(
         "T": T,
         "N_aff": None,
         "Q_loss": None,
+        "W_min_buffer": values.W_min_buffer,
+        "d0": values.d0,
+        "T_safe": values.T_safe,
+        "T_front_CAV_following": values.T_front_CAV_following,
+        "T_rear_HDV_following": values.T_rear_HDV_following,
+        "b_safe": values.b_safe,
     }
     return {"RD": RD, "rd_components": components}
 
@@ -581,6 +606,9 @@ def coerce_inventory_params(
         ),
         "d0": _config_value(params, "d0", 0.0),
         "T_safe": _config_value(params, "T_safe", 0.0),
+        "T_front_CAV_following": _config_value(params, "T_front_CAV_following", None),
+        "T_rear_HDV_following": _config_value(params, "T_rear_HDV_following", None),
+        "b_safe": _config_value(params, "b_safe", None),
         "u_min": _config_value(params, "u_min", -4.5),
         "u_max": _config_value(params, "u_max", 2.0),
         "rd_speed_scale": _config_value(params, "rd_speed_scale", 10.0),
@@ -674,6 +702,10 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
 def _nested_config_value(config: Any, section: str, name: str, default: Any = None) -> Any:
     parent = _config_value(config, section)
     return _config_value(parent, name, default)
+
+
+def _safety_time_headway(value: float | None, fallback: float) -> float:
+    return fallback if value is None else float(value)
 
 
 def _clip01(value: float) -> float:

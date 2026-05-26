@@ -62,7 +62,7 @@ def create_reservations(
         state_tau = state_by_tau.get(round(edge.tau, 10)) if edge is not None else None
         if edge is None or quality is None or state_tau is None:
             continue
-        interval = compute_feasible_interval(edge, state_tau)
+        interval = compute_feasible_interval(edge, state_tau, _slot_params_from_evaluation(selected_eval))
         planned_x = (interval.lower + interval.upper) / 2.0
         reservations.append(
             Reservation(
@@ -130,6 +130,7 @@ def update_reservation_at_tau(
     reservation: Reservation,
     edge: Edge,
     *,
+    slot_params: Mapping[str, Any] | Any | None = None,
     tolerance: float = 1e-6,
     unsafe_margin_epsilon: float = 1e-9,
 ) -> Reservation:
@@ -147,7 +148,7 @@ def update_reservation_at_tau(
     rear = state.vehicles.get(edge.rear_id)
     if ramp is None or front is None or rear is None:
         return replace(reservation, status="failed_invalid_slot", failure_reason="missing_vehicle_at_tau")
-    interval = compute_feasible_interval(edge, state)
+    interval = compute_feasible_interval(edge, state, slot_params)
     actual_x = ramp.x
     margin_front = interval.upper - actual_x
     margin_rear = actual_x - interval.lower
@@ -171,6 +172,7 @@ def update_reservations_at_tau(
     reservations: Sequence[Reservation],
     edge_map: Mapping[str, Edge],
     *,
+    slot_params: Mapping[str, Any] | Any | None = None,
     tolerance: float = 1e-6,
 ) -> list[Reservation]:
     """Update every reservation at the current state time."""
@@ -187,7 +189,15 @@ def update_reservations_at_tau(
                 )
             )
             continue
-        updated.append(update_reservation_at_tau(state, reservation, edge, tolerance=tolerance))
+        updated.append(
+            update_reservation_at_tau(
+                state,
+                reservation,
+                edge,
+                slot_params=slot_params,
+                tolerance=tolerance,
+            )
+        )
     return updated
 
 
@@ -214,6 +224,20 @@ def reservation_to_row(
         "stale_flag": reservation.stale_flag,
     }
     return {**dict(log_context or {}), **row}
+
+
+def _slot_params_from_evaluation(evaluation: ActionEvaluation) -> dict[str, Any] | None:
+    for quality in evaluation.edge_qualities:
+        components = quality.rd_components
+        return {
+            "W_min_buffer": components.get("W_min_buffer", 0.0),
+            "d0": components.get("d0", 0.0),
+            "T_safe": components.get("T_safe", 0.0),
+            "T_front_CAV_following": components.get("T_front_CAV_following"),
+            "T_rear_HDV_following": components.get("T_rear_HDV_following"),
+            "b_safe": components.get("b_safe"),
+        }
+    return None
 
 
 __all__ = [

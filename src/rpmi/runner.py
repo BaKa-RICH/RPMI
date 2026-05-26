@@ -1180,6 +1180,7 @@ def execute_episode_until_horizon(
             current,
             active_reservations,
             edge_map,
+            slot_params=slot_inventory_params(params),
             tolerance=max(params.dt, 1e-9) / 2.0,
         )
         vehicle_rows.extend(step_rows)
@@ -1871,7 +1872,7 @@ def _create_record_only_reservations(
         state_tau = state_by_tau.get(round(edge.tau, 10)) if edge is not None else None
         if edge is None or quality is None or state_tau is None:
             continue
-        interval = compute_feasible_interval(edge, state_tau)
+        interval = compute_feasible_interval(edge, state_tau, _slot_params_from_evaluation(evaluation))
         planned_x = (interval.lower + interval.upper) / 2.0
         status = "planned"
         reason = ""
@@ -1929,6 +1930,24 @@ def _write_final_inventory_logs(
                 log_context,
             ),
         )
+
+
+def _slot_params_from_evaluation(evaluation: ActionEvaluation) -> Any:
+    for quality in evaluation.edge_qualities:
+        return _slot_params_from_quality(quality)
+    return None
+
+
+def _slot_params_from_quality(quality: EdgeQuality) -> dict[str, float | None]:
+    components = quality.rd_components
+    return {
+        "W_min_buffer": float(components.get("W_min_buffer", 0.0) or 0.0),
+        "d0": float(components.get("d0", 0.0) or 0.0),
+        "T_safe": float(components.get("T_safe", 0.0) or 0.0),
+        "T_front_CAV_following": components.get("T_front_CAV_following"),
+        "T_rear_HDV_following": components.get("T_rear_HDV_following"),
+        "b_safe": components.get("b_safe"),
+    }
 
 
 def _write_readiness_diagnostics(

@@ -173,6 +173,43 @@ def test_near_miss_classifier_is_read_only_and_boundary_aware():
     assert no_cav.reason == "no_boundary_cav_mode"
 
 
+def test_near_miss_classifier_allows_small_negative_dynamic_width():
+    quality = EdgeQuality(
+        edge_id="e_negative_width",
+        ramp_id=1,
+        slot_id="s",
+        I_reach=1,
+        I_surv=1,
+        I_safe=0,
+        I_rec=1,
+        P_R=0.0,
+        RD=0.2,
+        W=-10.0,
+        V_phys_theory=0,
+        V_phys_buffer=0,
+        delta_W_req=10.0,
+        is_reservable=False,
+        reason_not_reservable="PHYS_WIDTH_NEGATIVE",
+        fail_reason_priority="PHYS_WIDTH_NEGATIVE",
+        surv_mode="deterministic_tau_generated",
+        validity_mode="deterministic_v0_cascade_rd_proxy_v0_minimal",
+        rd_components={"proxy_mode": "RD_proxy_v0_minimal"},
+        min_safety_margin=-10.0,
+        reachability={"I_reach": 1},
+    )
+
+    label = classify_near_miss(
+        quality,
+        "CAV-HDV",
+        {"near_miss_delta_W_max": 12.0},
+    )
+
+    assert label.is_near_miss
+    assert label.near_miss_type == "width_deficit"
+    assert label.delta_W_req == pytest.approx(10.0)
+    assert label.available_modes == ("front_acc",)
+
+
 def test_manifest_and_readiness_summary_are_writable(tmp_path):
     config = make_scenario_config("S2", seed=22)
     state = generate_state(config)

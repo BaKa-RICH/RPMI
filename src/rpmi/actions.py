@@ -49,6 +49,11 @@ class ActionConfig:
     target_lane: int = 0
     W_min_buffer: float = 5.0
     RD_max: float = 1.0
+    d0: float = 0.0
+    T_safe: float = 0.0
+    T_front_CAV_following: float | None = None
+    T_rear_HDV_following: float | None = None
+    b_safe: float | None = None
     u_min: float = -4.5
     u_max: float = 2.0
     v_max: float = 40.0
@@ -1038,6 +1043,11 @@ def slot_inventory_params(params: ActionConfig | Mapping[str, Any] | Any | None 
         target_lane=values.target_lane,
         W_min_buffer=values.W_min_buffer,
         RD_max=values.RD_max,
+        d0=values.d0,
+        T_safe=values.T_safe,
+        T_front_CAV_following=values.T_front_CAV_following,
+        T_rear_HDV_following=values.T_rear_HDV_following,
+        b_safe=values.b_safe,
         u_min=values.u_min,
         u_max=values.u_max,
         rd_speed_scale=values.rd_speed_scale,
@@ -1179,6 +1189,11 @@ def coerce_action_config(config: ActionConfig | Mapping[str, Any] | Any | None =
             "RD_max",
             _nested_config_value(config, "algorithm", "RD_max", 1.0),
         ),
+        "d0": _config_value(config, "d0", 0.0),
+        "T_safe": _config_value(config, "T_safe", 0.0),
+        "T_front_CAV_following": _config_value(config, "T_front_CAV_following", None),
+        "T_rear_HDV_following": _config_value(config, "T_rear_HDV_following", None),
+        "b_safe": _config_value(config, "b_safe", None),
         "u_min": _config_value(config, "u_min", -4.5),
         "u_max": _config_value(config, "u_max", 2.0),
         "v_max": _config_value(config, "v_max", 40.0),
