@@ -24,9 +24,12 @@ from rpmi.actions import (
     action_evaluation_to_row,
     action_to_row,
     boundary_type_for_edge,
+    build_boundary_speed_profile,
     commands_for_action,
     coerce_action_config,
     compute_objective,
+    compute_profile_cost,
+    controlled_cavs_for_mode,
     edge_metadata,
     evaluate_action,
     evaluate_rollout_inventory,
@@ -35,6 +38,7 @@ from rpmi.actions import (
     run_action_selection,
     select_action,
     slot_inventory_params,
+    validate_single_action,
 )
 from rpmi.analysis import (
     EVIDENCE_PACKAGE_VERSION,
@@ -297,9 +301,9 @@ BASELINE_CONFIGS: dict[str, BaselineConfig] = {
         baseline_id="forced_accommodation",
         uses_inventory=True,
         uses_rd=False,
-        uses_near_miss=True,
-        production_mode="rpmi",
-        action_conditioned_reservation=True,
+        uses_near_miss=False,
+        production_mode="forced",
+        action_conditioned_reservation=False,
         ablations=AblationConfig(forced_accommodation=True),
     ),
     "rpmi_cmv_without_rcmv": BaselineConfig(
@@ -641,6 +645,8 @@ def apply_baseline_policy(
         selected = _select_density_evaluation(context, action)
     elif baseline.production_mode == "speed":
         selected = _select_speed_evaluation(state, context, action)
+    elif baseline.production_mode == "forced":
+        return _select_forced_accommodation_baseline(state, context)
     else:
         raise ValueError(f"Unsupported baseline production mode: {baseline.production_mode!r}")
     return _baseline_result_from_selected(action, baseline_eval, selected)
@@ -1466,6 +1472,130 @@ def _select_speed_evaluation(
     )
 
 
+def _select_forced_accommodation_baseline(
+    state: TrafficState,
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Choose a forced action from physical geometry, not RPMI objective state."""
+
+    params: ActionConfig = context["action_params"]
+    baseline_eval: ActionEvaluation = context["baseline_evaluation"]
+    candidates = _forced_physical_candidates(state, context, params)
+    if not candidates:
+        selected_action = context["baseline_action"]
+        selected_eval = baseline_eval
+        actions = [selected_action]
+    else:
+        selected_action = max(candidates, key=lambda item: item[0])[1]
+        selected_eval = _evaluation_for_selected_edge_ids(
+            "forced_accommodation_physical_policy",
+            [str(selected_action.nominal_edge_id)],
+            selected_action,
+            context,
+            edge_by_id=context["edge_map"],
+        )
+        actions = [context["baseline_action"], selected_action]
+    selected = _copy_eval_flags(selected_eval, selected=True, rank=1, rcmv=0.0)
+    baseline = _copy_eval_flags(baseline_eval, selected=False, rank=2, rcmv=0.0)
+    evaluations = [selected] if selected.action_id == baseline.action_id else [baseline, selected]
+    return _policy_result(
+        selected_action,
+        actions,
+        evaluations,
+        selected,
+        uses_proposed=False,
+    )
+
+
+def _forced_physical_candidates(
+    state: TrafficState,
+    context: Mapping[str, Any],
+    params: ActionConfig,
+) -> list[tuple[tuple[int, float, float, float, str], Action]]:
+    candidates: list[tuple[tuple[int, float, float, float, str], Action]] = []
+    edge_map: Mapping[str, Edge] = context["edge_map"]
+    for index, quality in enumerate(context["qualities"]):
+        if quality.is_reservable:
+            continue
+        edge = edge_map.get(quality.edge_id)
+        if edge is None:
+            continue
+        boundary_type = boundary_type_for_edge(state, edge)
+        for mode in _available_boundary_modes_for_ablation(boundary_type):
+            action = _forced_action_for_physical_edge(index, mode, edge, quality, state, params)
+            if action is None:
+                continue
+            width_after = _estimated_width_after_action(action, quality)
+            key = (
+                int(width_after >= params.W_min_buffer),
+                -float(edge.tau),
+                float(width_after),
+                -float(action.estimated_cost),
+                action.action_id,
+            )
+            candidates.append((key, action))
+    return candidates
+
+
+def _forced_action_for_physical_edge(
+    index: int,
+    mode: str,
+    edge: Edge,
+    quality: EdgeQuality,
+    state: TrafficState,
+    params: ActionConfig,
+) -> Action | None:
+    near_miss = NearMissEdge(
+        edge_id=edge.edge_id,
+        near_miss_type="forced_accommodation_physical_grid",
+        delta_W_req=max(float(quality.delta_W_req), 0.0),
+        available_modes=(mode,),
+        screen_score=0.0,
+        selected_for_rollout=True,
+        ramp_id=edge.ramp_id,
+        slot_id=edge.slot_id,
+        front_id=edge.front_id,
+        rear_id=edge.rear_id,
+        tau=edge.tau,
+        boundary_type=boundary_type_for_edge(state, edge),
+        W=quality.W,
+        RD=quality.RD,
+        reason="forced_accommodation_physical_geometry",
+    )
+    controlled = controlled_cavs_for_mode(mode, edge, state)
+    profile = build_boundary_speed_profile(mode, near_miss, edge, state, params)
+    action = Action(
+        action_id=make_action_id(mode, index),
+        action_type=mode,  # type: ignore[arg-type]
+        nominal_edge_id=edge.edge_id,
+        controlled_cavs=controlled,
+        target_gap_id=edge.physical_gap_id,
+        control_profile=profile,
+        estimated_cost=compute_profile_cost(profile, params),
+        boundary_type=near_miss.boundary_type,
+    )
+    ok, reason = validate_single_action(action, state)
+    if ok:
+        return action
+    return Action(
+        action_id=action.action_id,
+        action_type=action.action_type,
+        nominal_edge_id=action.nominal_edge_id,
+        controlled_cavs=action.controlled_cavs,
+        target_gap_id=action.target_gap_id,
+        control_profile=action.control_profile,
+        estimated_cost=action.estimated_cost,
+        boundary_type=action.boundary_type,
+        rejected_before_rollout=True,
+        reject_reason=reason,
+    )
+
+
+def _estimated_width_after_action(action: Action, quality: EdgeQuality) -> float:
+    profile = action.control_profile
+    return float(quality.W) + float(profile.get("estimated_delta_W_after_clip", 0.0))
+
+
 def _evaluation_for_selected_edge_ids(
     matching_id: str,
     selected_ids: Sequence[str],
@@ -1588,7 +1718,12 @@ def _run_forced_accommodation_selection(
     context: Mapping[str, Any],
     params: ActionConfig,
 ) -> Any:
-    actions = _candidate_actions_for_logging(state, context, params)
+    actions = generate_candidate_actions(
+        _bruteforce_boundary_edges_as_near_misses(state, context),
+        context["edge_map"],
+        state,
+        params,
+    )
     baseline = evaluate_action(actions[0], state, params)
     evaluations = [baseline]
     for action in actions[1:]:
@@ -1599,17 +1734,9 @@ def _run_forced_accommodation_selection(
         if item.action_id != "a0_none" and item.matched_edge_ids and item.matched_count > 0
     ]
     if not non_none:
-        return select_action(actions, evaluations, theta=0.0)
-    selected = sorted(
-        non_none,
-        key=lambda item: (
-            item.C_bar,
-            item.matched_count,
-            -item.D_bar,
-            item.action_id,
-        ),
-        reverse=True,
-    )[0]
+        selected = baseline
+    else:
+        selected = max(non_none, key=_forced_accommodation_geometry_key)
     ranked = sorted(
         evaluations,
         key=lambda item: (item.action_id != selected.action_id, -item.RCMV, item.action_id),
@@ -1630,6 +1757,30 @@ def _run_forced_accommodation_selection(
         evaluations=final_evaluations,
         selected_action=action_by_id[final_selected.action_id],
         selected_evaluation=final_selected,
+    )
+
+
+def _forced_accommodation_geometry_key(evaluation: ActionEvaluation) -> tuple[int, float, float, str]:
+    """Rank forced-accommodation actions without RPMI objective scores."""
+
+    selected_ids = set(evaluation.matched_edge_ids)
+    widths = [
+        quality.W
+        for quality in evaluation.edge_qualities
+        if quality.edge_id in selected_ids
+    ]
+    taus = [
+        edge.tau
+        for edge in evaluation.edges
+        if edge.edge_id in selected_ids
+    ]
+    earliest_tau = min(taus, default=math.inf)
+    max_width = max(widths, default=-math.inf)
+    return (
+        int(evaluation.matched_count),
+        -float(earliest_tau),
+        float(max_width),
+        evaluation.action_id,
     )
 
 
