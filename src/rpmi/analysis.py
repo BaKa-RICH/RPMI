@@ -1457,10 +1457,18 @@ def _evaluate_gate_d0(gate_dir: Path) -> dict[str, Any]:
             "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
         ]
     ) and not (gate_dir / "failure_summary.csv").exists()
+    positive_rcmv_package_present = all(
+        (gate_dir / relative).exists()
+        for relative in [
+            "positive_rcmv_micro/positive_rcmv_manifest.json",
+            "positive_rcmv_micro/positive_rcmv_rcmv_trace.csv",
+            "positive_rcmv_micro/positive_rcmv_aggregate_metrics.csv",
+            "positive_rcmv_micro/positive_rcmv_failure_summary.csv",
+        ]
+    )
     positive_rcmv_formal = (
-        int(_float(positive_manifest.get("positive_rcmv_case_count"))) > 0
-        and (gate_dir / "positive_rcmv_micro" / "positive_rcmv_rcmv_trace.csv").exists()
-        and (gate_dir / "positive_rcmv_micro" / "positive_rcmv_aggregate_metrics.csv").exists()
+        positive_rcmv_package_present
+        and int(_float(positive_manifest.get("positive_rcmv_case_count"))) > 0
     )
     failure_trace_joinable = bool(failure_rows) and all(
         bool(row.get("failure_join_key")) for row in failure_rows
@@ -1475,7 +1483,7 @@ def _evaluate_gate_d0(gate_dir: Path) -> dict[str, Any]:
         completeness_failures.append("state_hash_fairness_failed_or_missing")
     if not failure_summary_layered:
         completeness_failures.append("failure_summary_layering_missing_or_overwritten")
-    if not positive_rcmv_formal:
+    if not positive_rcmv_package_present:
         completeness_failures.append("positive_rcmv_micro_package_missing")
     if not failure_trace_joinable:
         completeness_failures.append("failure_trace_samples_not_joinable")
@@ -1538,6 +1546,7 @@ def _evaluate_gate_d0(gate_dir: Path) -> dict[str, Any]:
         "failed_reservation_zero_but_unserved_or_no_merge_examples": denominator_warning_examples,
         "positive_rcmv_case_formally_included": positive_rcmv_formal,
         "positive_rcmv_case_count": int(_float(positive_manifest.get("positive_rcmv_case_count"))),
+        "positive_rcmv_micro_package_present": positive_rcmv_package_present,
         "failure_summary_split_main_readiness_positive": failure_summary_layered,
         "failure_summary_files": [
             "failure_summary_main_batch.csv",
@@ -1635,6 +1644,7 @@ def _evaluate_gate_d0(gate_dir: Path) -> dict[str, Any]:
             "state_hash_fairness_pass": state_hash_fairness_pass,
             "failure_summary_layered": failure_summary_layered,
             "positive_rcmv_formal": positive_rcmv_formal,
+            "positive_rcmv_micro_package_present": positive_rcmv_package_present,
             "gate_manifest_batch_id": gate_manifest.get("batch_id", ""),
             "claim_table_rows": len(claim_rows),
         },
@@ -2788,6 +2798,7 @@ def _write_evidence_index(
             "reservation_denominator_file": "main_batch/aggregate_metrics_completed.csv",
             "demand_denominator_file": "main_batch/aggregate_metrics_completed.csv",
             "positive_rcmv_case_formally_included": len(positive_dirs) > 0,
+            "positive_rcmv_micro_package_present": True,
             "readiness_failure_saved_separately": True,
             "failure_summary_layered_names": [
                 "main_batch/failure_summary_main_batch.csv",

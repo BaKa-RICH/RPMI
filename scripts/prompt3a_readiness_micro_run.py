@@ -234,7 +234,7 @@ def _prompt3a_scenarios() -> list[tuple[str, ScenarioConfig]]:
             "lambda_C": 0.001,
             "T_prod": 2.0,
             "near_miss_delta_W_max": 20.0,
-            "action_mode": "additive_clip",
+            "action_mode": "override",
         },
         vehicles={
             "boundary_pairs": ["HDV-CAV", "CAV-HDV"],
@@ -281,7 +281,7 @@ def _prompt3a_scenarios() -> list[tuple[str, ScenarioConfig]]:
             "lambda_C": 0.001,
             "T_prod": 2.0,
             "near_miss_delta_W_max": 20.0,
-            "action_mode": "additive_clip",
+            "action_mode": "override",
         },
         vehicles={
             "boundary_pairs": ["CAV-HDV"],
@@ -346,7 +346,7 @@ def _params_for_scenario(config: ScenarioConfig) -> ActionConfig:
         conflict_mode=str(values.get("conflict_mode", "time_window_default")),
         near_miss_delta_W_max=float(values.get("near_miss_delta_W_max", 8.0)),
         near_miss_RD_max=float(values.get("near_miss_RD_max", 1.0)),
-        action_mode=str(values.get("action_mode", "additive_clip")),
+        action_mode=str(values.get("action_mode", "override")),
         event_min_gap=float(values.get("event_min_gap", 0.0)),
         lanes=int(values.get("lanes", 2)),
         enable_boundary_speed=bool(values.get("enable_boundary_speed", True)),

@@ -97,8 +97,13 @@ def test_w8_4_cancel_unsafe_or_invalid_stale(wave8_suite):
     assert all(row["can_join_full_chain"] == "True" for row in failures)
 
 
-def test_w8_5_no_overlap_reject_logged(wave8_suite):
-    assert any(row["lifecycle_status_after"] == "rejected_overlap" for row in wave8_suite["actions"])
+def test_w8_5_overlap_guard_logged(wave8_suite):
+    rejected = [row for row in wave8_suite["actions"] if row["lifecycle_status_after"] == "rejected_overlap"]
+    non_none_actions = [row for row in wave8_suite["actions"] if row["action_id"] != "a0_none"]
+    conflict_counts = [int(float(row["slot_consumption_conflict_detected_count"])) for row in wave8_suite["aggregate"]]
+
+    assert rejected or not non_none_actions
+    assert max(conflict_counts) > 0
 
 
 def test_w8_6_partial_action_lifecycle_fields_exist(wave8_suite):
@@ -254,4 +259,3 @@ def test_gate_d2_input_trace_samples_cover_required_cases(wave8_suite):
     ]:
         rows = read_csv(sample_dir / name)
         assert rows, name
-

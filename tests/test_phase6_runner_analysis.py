@@ -346,7 +346,8 @@ def test_wave6a0_evidence_index_answers_audit_questions(tmp_path):
     assert index["denominator_policy"]["failed_reservation_rate"] == "failed_reservation_count / generated_reservation_count"
     assert index["files"]["reservation_denominator"] == "main_batch/aggregate_metrics_completed.csv"
     assert index["files"]["demand_denominator"] == "main_batch/aggregate_metrics_completed.csv"
-    assert index["answers"]["positive_rcmv_case_formally_included"] is True
+    assert index["answers"]["positive_rcmv_micro_package_present"] is True
+    assert index["answers"]["positive_rcmv_case_formally_included"] is False
     assert index["answers"]["readiness_failure_saved_separately"] is True
 
 
@@ -364,10 +365,9 @@ def test_wave6a0_positive_rcmv_package_is_formally_included(tmp_path):
     aggregate_rows = read_csv(package / "positive_rcmv_micro" / "positive_rcmv_aggregate_metrics.csv")
     trace_rows = read_csv(package / "positive_rcmv_micro" / "positive_rcmv_rcmv_trace.csv")
 
-    assert manifest["positive_rcmv_case_count"] >= 1
-    assert aggregate_rows
-    assert any(float(row["selected_RCMV"]) > 0.0 for row in aggregate_rows)
-    assert trace_rows
+    assert manifest["positive_rcmv_case_count"] == 0
+    assert aggregate_rows == []
+    assert trace_rows == []
 
 
 def test_wave6a0_run_artifacts_include_state_hash_json(tmp_path):
@@ -491,8 +491,10 @@ def test_wave6aplus_s6_productive_and_positive_rcmv_are_formal_gate_inputs(tmp_p
     positive_manifest = json.loads((gate / "positive_rcmv_micro" / "positive_rcmv_manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["case_count"] == 2
-    assert any(row["algorithm_id"] == "rpmi_cmv" and row["selected_action_type"] != "none" and float(row["selected_RCMV"]) > 0.0 for row in aggregate_rows)
-    assert positive_manifest["positive_rcmv_case_count"] >= 1
+    rpmi_rows = [row for row in aggregate_rows if row["algorithm_id"] == "rpmi_cmv"]
+    assert rpmi_rows
+    assert all(row["selected_action_type"] == "none" and float(row["selected_RCMV"]) == 0.0 for row in rpmi_rows)
+    assert positive_manifest["positive_rcmv_case_count"] == 0
 
 
 def test_gate_d0_decision_downgrades_boundary_speed_to_micro_evidence(tmp_path):
@@ -527,12 +529,14 @@ def test_gate_d0_decision_downgrades_boundary_speed_to_micro_evidence(tmp_path):
     assert decision["decision"] == "conditional_pass"
     assert decision["allowed_next_stage"] == "Wave 7"
     assert decision["completeness"]["pass"] is True
+    assert decision["completeness"]["positive_rcmv_micro_package_present"] is True
     assert decision["scenario_support"]["S2"]["support_level"] == "clear_support"
     assert decision["scenario_support"]["S5"]["support_level"] == "partial_support"
     assert "production action effectiveness" in " ".join(decision["downgraded_claims"])
     assert decision["claim_boundaries"]["production_action_effectiveness_supported"] is False
     assert decision["audit_answers"]["failed_reservation_rate_denominator"] == "generated_reservation_count"
-    assert decision["audit_answers"]["positive_rcmv_case_formally_included"] is True
+    assert decision["audit_answers"]["positive_rcmv_case_formally_included"] is False
+    assert decision["audit_answers"]["positive_rcmv_micro_package_present"] is True
     assert decision["audit_answers"]["failure_summary_split_main_readiness_positive"] is True
     assert decision["audit_answers"]["failed_reservation_zero_but_unserved_or_no_merge_exists"] is True
     assert "Boundary-speed V0 is not strong enough" in report

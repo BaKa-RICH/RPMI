@@ -986,7 +986,7 @@ def _global_sim(*, H: float) -> dict[str, Any]:
         "lambda_C": 0.001,
         "T_prod": 2.0,
         "near_miss_delta_W_max": 20.0,
-        "action_mode": "additive_clip",
+        "action_mode": "override",
     }
 
 

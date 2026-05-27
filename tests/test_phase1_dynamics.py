@@ -13,6 +13,7 @@ from rpmi.dynamics import (
     detect_overlap,
     find_leader,
     occupied_interval,
+    resolve_final_accel_command,
     sort_lane_vehicles,
     step_traffic,
     step_vehicle_kinematic,
@@ -171,13 +172,41 @@ def test_cav_without_action_still_uses_nominal_following():
     assert events
 
 
-def test_combine_nominal_and_action_modes():
+def test_final_accel_command_overrides_nominal_accel():
+    assert resolve_final_accel_command(0.4, None) == pytest.approx(0.4)
+    assert resolve_final_accel_command(0.4, 1.0) == pytest.approx(1.0)
     assert combine_nominal_and_action(0.4, None, "override") == pytest.approx(0.4)
     assert combine_nominal_and_action(0.4, 1.0, "override") == pytest.approx(1.0)
-    assert combine_nominal_and_action(0.4, 1.0, "additive_clip") == pytest.approx(1.4)
 
-    with pytest.raises(ValueError, match="Unknown action"):
+    with pytest.raises(ValueError, match="Unsupported action command mode"):
         combine_nominal_and_action(0.0, 1.0, "mystery")
+
+
+def test_step_traffic_command_overrides_nonzero_nominal_accel():
+    vehicle = make_vehicle(1, x=0.0, v=10.0, idm_params={"a_max": 1.0, "v0": 30.0})
+    state = TrafficState(time=0.0, step=0, vehicles={1: vehicle})
+    config = SimpleNamespace(dt=1.0, action_mode="override", limits={"u_min": -4.5, "u_max": 2.0, "v_max": 40.0})
+
+    next_state, rows, events = step_traffic(
+        state,
+        {1: {"a_action": 0.25, "action_id": "act_front_acc_0"}},
+        config,
+    )
+
+    assert rows[0]["a_nominal"] != pytest.approx(0.0)
+    assert rows[0]["a_action"] == pytest.approx(0.25)
+    assert rows[0]["a_eff"] == pytest.approx(0.25)
+    assert next_state.vehicles[1].v == pytest.approx(10.25)
+    assert events == []
+
+
+def test_step_traffic_rejects_legacy_non_override_action_mode():
+    vehicle = make_vehicle(1, x=0.0, v=10.0)
+    state = TrafficState(time=0.0, step=0, vehicles={1: vehicle})
+    config = SimpleNamespace(dt=1.0, action_mode="legacy_non_override", limits={"u_min": -4.5, "u_max": 2.0, "v_max": 40.0})
+
+    with pytest.raises(ValueError, match="Unsupported action command mode"):
+        step_traffic(state, {1: {"a_action": 0.25}}, config)
 
 
 def test_vehicle_and_event_csv_append_hooks(tmp_path):

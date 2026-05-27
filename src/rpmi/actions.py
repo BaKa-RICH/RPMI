@@ -71,7 +71,7 @@ class ActionConfig:
     conflict_mode: str = "time_window_default"
     near_miss_delta_W_max: float = 8.0
     near_miss_RD_max: float = 1.0
-    action_mode: str = "additive_clip"
+    action_mode: str = "override"
     event_min_gap: float = 0.0
     lanes: int = 2
     enable_boundary_speed: bool = True
@@ -86,6 +86,9 @@ class ActionConfig:
     lc_allow_exceed_T_prod: bool = False
     lc_mode: str = "discrete_switch_at_end"
     lc_upstream_search_distance: float = 80.0
+
+    def __post_init__(self) -> None:
+        _validate_action_mode(self.action_mode)
 
 
 @dataclass(frozen=True)
@@ -977,7 +980,7 @@ def commands_for_action(
     current_time: float,
     params: ActionConfig | Mapping[str, Any] | Any | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Return overlay commands active within the production window."""
+    """Return final production commands active within the production window."""
 
     values = coerce_action_config(params)
     if action.action_type == "none" or not action.controlled_cavs:
@@ -1235,7 +1238,7 @@ def coerce_action_config(config: ActionConfig | Mapping[str, Any] | Any | None =
         ),
         "near_miss_delta_W_max": _config_value(config, "near_miss_delta_W_max", 8.0),
         "near_miss_RD_max": _config_value(config, "near_miss_RD_max", 1.0),
-        "action_mode": _config_value(config, "action_mode", "additive_clip"),
+        "action_mode": _validate_action_mode(_config_value(config, "action_mode", "override")),
         "event_min_gap": _config_value(config, "event_min_gap", 0.0),
         "lanes": _config_value(config, "lanes", _nested_config_value(config, "road", "lanes", 2)),
         "enable_boundary_speed": _config_value(config, "enable_boundary_speed", True),
@@ -1317,6 +1320,13 @@ def compute_profile_cost(profile: Mapping[str, Any], params: ActionConfig) -> fl
     return _normalized_effort(profile, params) + (
         0.0 if bool(profile.get("action_profile_feasible", False)) else 1.0
     )
+
+
+def _validate_action_mode(value: Any) -> str:
+    mode = str(value)
+    if mode != "override":
+        raise ValueError(f"Unsupported action command mode: {mode!r}")
+    return mode
 
 
 def _dynamics_config(values: ActionConfig) -> dict[str, Any]:

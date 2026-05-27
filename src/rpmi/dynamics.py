@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
 import math
 
 from rpmi.state import TrafficState, VehicleState
@@ -131,20 +131,27 @@ def compute_nominal_accel(
     raise ValueError(f"Unknown vehicle type: {vehicle.veh_type!r}")
 
 
+def resolve_final_accel_command(
+    a_nominal: float,
+    a_command: float | None,
+) -> float:
+    """Resolve the final acceleration command before kinematic clipping."""
+
+    if a_command is None:
+        return a_nominal
+    return a_command
+
+
 def combine_nominal_and_action(
     a_nominal: float,
     a_action: float | None,
-    mode: Literal["override", "additive_clip"] | str = "override",
+    mode: str = "override",
 ) -> float:
-    """Overlay an optional production command without safety repair."""
+    """Compatibility wrapper for the final-command production semantics."""
 
-    if a_action is None:
-        return a_nominal
-    if mode == "override":
-        return a_action
-    if mode == "additive_clip":
-        return a_nominal + a_action
-    raise ValueError(f"Unknown action combine mode: {mode!r}")
+    if mode != "override":
+        raise ValueError(f"Unsupported action command mode: {mode!r}")
+    return resolve_final_accel_command(a_nominal, a_action)
 
 
 def clip_accel_for_kinematics(
@@ -307,6 +314,8 @@ def step_traffic(
     commands = commands_by_vehicle or {}
     dt = float(_config_value(config, "dt", 0.1))
     action_mode = _config_value(config, "action_mode", "override")
+    if action_mode != "override":
+        raise ValueError(f"Unsupported action command mode: {action_mode!r}")
     event_min_gap = float(
         _config_value(
             config,
@@ -339,7 +348,7 @@ def step_traffic(
         lane_change_command = _command_lane_change(command)
         a_action = _command_value(command)
         action_ids_by_vehicle[vehicle_id] = _command_action_id(command)
-        a_cmd = combine_nominal_and_action(a_nominal, a_action, action_mode)
+        a_cmd = resolve_final_accel_command(a_nominal, a_action)
         limits = _limits_for_vehicle(vehicle, config)
         a_eff, speed_floor_clip = clip_accel_for_kinematics(vehicle.v, a_cmd, dt, limits)
         updated = step_vehicle_kinematic(vehicle, a_eff, dt, limits)
@@ -539,6 +548,7 @@ __all__ = [
     "detect_overlap",
     "find_leader",
     "occupied_interval",
+    "resolve_final_accel_command",
     "sort_lane_vehicles",
     "step_traffic",
     "step_vehicle_kinematic",

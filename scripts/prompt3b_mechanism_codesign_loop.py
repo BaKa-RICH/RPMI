@@ -762,7 +762,7 @@ def _sim(*, H: float, lambda_C: float, theta: float) -> dict[str, Any]:
         "lambda_C": lambda_C,
         "T_prod": 2.0,
         "near_miss_delta_W_max": 20.0,
-        "action_mode": "additive_clip",
+        "action_mode": "override",
     }
 
 
